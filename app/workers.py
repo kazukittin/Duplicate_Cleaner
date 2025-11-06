@@ -1,4 +1,3 @@
-
 from PySide6.QtCore import QThread, Signal
 import os
 from .image_utils import is_image_path, get_image_meta, sha256_file as img_sha256, phash_hex, laplacian_variance
@@ -46,8 +45,8 @@ class ScanWorker(QThread):
                 items.append(it)
                 dup_groups_map.setdefault(h, []).append(it)
 
-                if i % 20 == 0:
-                    self.sig_progress.emit(int(i/total*30))
+                if i % 50 == 0:
+                    self.sig_progress.emit(int(i/total*25))
 
             groups = []
             for h, arr in dup_groups_map.items():
@@ -64,31 +63,38 @@ class ScanWorker(QThread):
                     it.phash = phash_hex(it.path)
                 else:
                     it.phash = video_phash_hex(it.path, samples=12)
-                if i % 20 == 0:
-                    self.sig_progress.emit(30 + int(i/len(unique_items)*40))
+                if i % 50 == 0:
+                    self.sig_progress.emit(25 + int(i/len(unique_items)*35))
 
-            MAX_SIM = 1200
-            sim_groups = []
-            if len(unique_items) <= MAX_SIM:
+            from collections import defaultdict
+            buckets = defaultdict(list)
+            for it in unique_items:
+                if not it.phash:
+                    continue
+                prefix = it.phash[:4]
+                buckets[prefix].append(it)
+
+            for idx, (prefix, arr) in enumerate(buckets.items(), start=1):
+                if len(arr) < 2:
+                    continue
                 visited = set()
-                for i, a in enumerate(unique_items):
+                for i, a in enumerate(arr):
                     if i in visited or not a.phash:
                         continue
                     grp = [a]
-                    for j in range(i+1, len(unique_items)):
-                        b = unique_items[j]
+                    for j in range(i+1, len(arr)):
+                        b = arr[j]
                         if not b.phash:
                             continue
                         if hamming(a.phash, b.phash) <= self.sim_thresh:
-                            grp.append(b)
-                            visited.add(j)
+                            grp.append(b); visited.add(j)
                     if len(grp) >= 2:
-                        g = ResultGroup(kind="類似", title=f"pHash group {a.phash[:8]}", items=grp, score=1.0)
                         keep = max(grp, key=lambda it: (it.width*it.height, it.size))
                         for it in grp:
                             it.similarity = 1.0 if it is not keep else None
-                        sim_groups.append(g)
-            groups.extend(sim_groups)
+                        groups.append(ResultGroup(kind="類似", title=f"pHash {prefix}", items=grp, score=1.0))
+                if idx % 50 == 0:
+                    self.sig_progress.emit(60 + int(idx/len(buckets)*35))
 
             for k, g in enumerate(groups, start=1):
                 for it in g.items:
@@ -96,7 +102,8 @@ class ScanWorker(QThread):
                         it.blur = laplacian_variance(it.path)
                     else:
                         it.blur = None
-                self.sig_progress.emit(70 + int(k/len(groups)*25))
+                if k % 20 == 0:
+                    self.sig_progress.emit(95)
 
             self.sig_progress.emit(100)
             self.sig_finished.emit(groups)
