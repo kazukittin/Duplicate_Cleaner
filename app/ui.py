@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
 
-        self.btn_showmore = QPushButton("もっと表示")
+        self.btn_showmore: QPushButton | None = QPushButton("もっと表示")
         self.btn_showmore.clicked.connect(self.load_more)
         self.btn_showmore.setEnabled(False)
         tb.addWidget(self.btn_showmore)
@@ -178,7 +178,9 @@ class MainWindow(QMainWindow):
 
         self.preview.clear(); self.clear_compare(); self.progress.setValue(0)
         self._all_groups = []; self._page = 0
-        self.btn_showmore.setEnabled(False)
+        btn = getattr(self, "btn_showmore", None)
+        if btn is not None:
+            btn.setEnabled(False)
         self._path_items.clear()
         for data in self._group_data.values():
             data["tree"].clear()
@@ -246,14 +248,16 @@ class MainWindow(QMainWindow):
         data = self._group_data[tab_key]
         groups = data["groups"]
         if not groups:
-            if tab_key == self.current_tab_key():
-                self.btn_showmore.setEnabled(False)
+            btn = getattr(self, "btn_showmore", None)
+            if tab_key == self.current_tab_key() and btn is not None:
+                btn.setEnabled(False)
             return
         start = data["page"] * BATCH_SIZE
         end = min(len(groups), start + BATCH_SIZE)
         if start >= end:
-            if tab_key == self.current_tab_key():
-                self.btn_showmore.setEnabled(False)
+            btn = getattr(self, "btn_showmore", None)
+            if tab_key == self.current_tab_key() and btn is not None:
+                btn.setEnabled(False)
             return
         tree = data["tree"]
         tree.setUpdatesEnabled(False)
