@@ -430,7 +430,9 @@ class MainWindow(QMainWindow):
 
     def on_tab_changed(self, index: int):
         self.clear_compare()
-        self.preview.clear()
+        preview = getattr(self, "preview", None)
+        if preview is not None:
+            preview.clear()
         self._update_showmore_state()
 
     def _iter_trees(self):
