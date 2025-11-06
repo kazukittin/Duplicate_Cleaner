@@ -144,12 +144,15 @@ class ScanWorker(QThread):
             blur_candidates = []
             img_items = [it for it in items if is_image_path(it.path)]
             total_blur = max(1, len(img_items))
+            last_progress = 90
             for idx, it in enumerate(img_items, start=1):
                 it.blur = laplacian_variance(it.path)
                 if self.blur_thresh and it.blur < self.blur_thresh:
                     blur_candidates.append(it)
-                if idx % 20 == 0:
-                    self.sig_progress.emit(90 + int(idx / total_blur * 5))
+                progress = 90 + int(idx / total_blur * 5)
+                if progress > last_progress:
+                    self.sig_progress.emit(progress)
+                    last_progress = progress
             for it in items:
                 if not is_image_path(it.path):
                     it.blur = None
