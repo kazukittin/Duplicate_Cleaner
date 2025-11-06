@@ -10,12 +10,12 @@ class ThumbnailProvider:
         self.cache_dir = os.path.join(tempfile.gettempdir(), "dupsnap_thumb")
         os.makedirs(self.cache_dir, exist_ok=True)
 
-    def thumb_path(self, src: str) -> str:
+    def thumb_path(self, src: str, max_w: int, max_h: int) -> str:
         base = src.replace(':','_').replace('/','_').replace('\\','_')
-        return os.path.join(self.cache_dir, base + ".jpg")
+        return os.path.join(self.cache_dir, f"{base}_{max_w}x{max_h}.jpg")
 
     def get_pixmap(self, src: str, max_w=700, max_h=700):
-        tp = self.thumb_path(src)
+        tp = self.thumb_path(src, max_w, max_h)
         if not os.path.exists(tp):
             try:
                 if is_video_path(src):
