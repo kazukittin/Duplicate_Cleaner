@@ -433,7 +433,8 @@ class MainWindow(QMainWindow):
         preview = getattr(self, "preview", None)
         if preview is not None:
             preview.clear()
-        self._update_showmore_state()
+        if hasattr(self, "btn_showmore"):
+            self._update_showmore_state()
 
     def _iter_trees(self):
         for key in self._tab_keys:
@@ -442,13 +443,16 @@ class MainWindow(QMainWindow):
                 yield data["tree"]
 
     def _update_showmore_state(self):
+        btn = getattr(self, "btn_showmore", None)
+        if btn is None:
+            return
         key = self.current_tab_key()
         data = self._group_data.get(key)
         if not data or not data["groups"]:
-            self.btn_showmore.setEnabled(False)
+            btn.setEnabled(False)
             return
         has_more = data["page"] * BATCH_SIZE < len(data["groups"])
-        self.btn_showmore.setEnabled(has_more)
+        btn.setEnabled(has_more)
 
     def _register_item(self, path: str, item: QTreeWidgetItem):
         if not path:
