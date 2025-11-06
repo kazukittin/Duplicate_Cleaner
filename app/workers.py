@@ -2,6 +2,7 @@
 from PySide6.QtCore import QThread, Signal
 import os
 import time
+import statistics
 from .image_utils import is_image_path, get_image_meta, sha256_file as img_sha256, phash_hex, laplacian_variance
 from .video_utils import is_video_path, video_meta, sha256_file as vid_sha256, video_phash_hex
 from .models import ResultGroup, ResultItem
@@ -18,7 +19,10 @@ def similarity_score_from_distance(dist: int | None) -> int | None:
 def blur_score_from_value(blur_value: float | None, threshold: float | None) -> int | None:
     if blur_value is None or not threshold or threshold <= 0:
         return None
-    score = 100.0 - (blur_value / threshold) * 100.0
+    severity = (threshold - blur_value) / threshold
+    if severity <= 0:
+        return None
+    score = severity * 100.0
     return int(max(1, min(100, round(score))))
 
 class ScanWorker(QThread):
@@ -216,13 +220,13 @@ class ScanWorker(QThread):
                 if processed % 20 == 0:
                     self.sig_progress.emit(55 + int(processed/total_b*35))
 
-            blur_candidates = []
             img_items = [it for it in items if is_image_path(it.path)]
             blur_total = len(img_items)
             if not blur_total:
                 emit_stage("ブレ判定 (0/0)", force=True)
             total_blur = max(1, blur_total)
             last_progress = 90
+            blur_values: list[float] = []
             for idx, it in enumerate(img_items, start=1):
                 emit_stage(f"ブレ判定 ({idx}/{blur_total})" if blur_total else "ブレ判定 (0/0)")
                 if it.blur is None:
@@ -233,8 +237,8 @@ class ScanWorker(QThread):
                                      it.width, it.height, "img", it.blur)
                     except Exception:
                         pass
-                if self.blur_thresh and it.blur is not None and it.blur < self.blur_thresh:
-                    blur_candidates.append(it)
+                if it.blur is not None:
+                    blur_values.append(it.blur)
                 progress = 90 + int(idx / total_blur * 5)
                 if progress > last_progress:
                     self.sig_progress.emit(progress)
@@ -243,12 +247,44 @@ class ScanWorker(QThread):
                 if not is_image_path(it.path):
                     it.blur = None
 
-            if self.blur_thresh and blur_candidates:
-                for it in blur_candidates:
-                    it.blur_score = blur_score_from_value(it.blur, self.blur_thresh)
+            blur_candidates: list[ResultItem] = []
+            dynamic_blur_threshold: float | None = None
+            if blur_values:
+                sorted_vals = sorted(v for v in blur_values if v is not None)
+                if sorted_vals:
+                    if len(sorted_vals) >= 4:
+                        q1 = statistics.quantiles(sorted_vals, n=4)[0]
+                    else:
+                        q1 = sorted_vals[0]
+                    dynamic_blur_threshold = q1
+                    if self.blur_thresh:
+                        dynamic_blur_threshold = min(dynamic_blur_threshold, float(self.blur_thresh))
+
+            candidate_threshold: float | None = dynamic_blur_threshold
+            if candidate_threshold is None and self.blur_thresh:
+                candidate_threshold = float(self.blur_thresh)
+
+            if candidate_threshold and candidate_threshold > 0:
+                for it in img_items:
+                    if it.blur is None or it.blur > candidate_threshold:
+                        continue
+                    severity = (candidate_threshold - it.blur) / candidate_threshold
+                    if severity <= 0.05:
+                        continue
+                    score = blur_score_from_value(it.blur, candidate_threshold)
+                    if score is None:
+                        continue
+                    it.blur_score = score
+                    blur_candidates.append(it)
+
+            if blur_candidates:
                 blur_candidates.sort(key=lambda it: it.blur_score if it.blur_score is not None else 0, reverse=True)
                 max_score = max((it.blur_score for it in blur_candidates if it.blur_score is not None), default=None)
-                title = f"ブレ疑い (< {self.blur_thresh})"
+                threshold_for_title = candidate_threshold or self.blur_thresh
+                if threshold_for_title:
+                    title = f"ブレ疑い (≲ {int(round(threshold_for_title))})"
+                else:
+                    title = "ブレ疑い"
                 groups.append(ResultGroup(kind="ブレ", title=title, items=blur_candidates, score=max_score))
 
             cache.commit()
