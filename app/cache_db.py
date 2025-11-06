@@ -1,6 +1,7 @@
 
 import sqlite3
 import os
+from typing import Optional
 
 class HashCache:
     def __init__(self, db_path: str):
@@ -22,23 +23,28 @@ class HashCache:
           phash  TEXT,
           width  INTEGER,
           height INTEGER,
-          kind   TEXT
+          kind   TEXT,
+          blur   REAL
         );
         CREATE INDEX IF NOT EXISTS idx_prefix ON files(substr(phash,1,4));
         """ )
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(files)")}
+        if "blur" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN blur REAL")
 
     def get(self, path: str, size: int, mtime: float):
         cur = self.conn.execute(
-            "SELECT sha256, phash, width, height, kind FROM files WHERE path=? AND size=? AND mtime=?",
+            "SELECT sha256, phash, width, height, kind, blur FROM files WHERE path=? AND size=? AND mtime=?",
             (path, size, mtime)
         )
         return cur.fetchone()
 
     def upsert(self, path: str, size: int, mtime: float,
-               sha256: str, phash: str, width: int, height: int, kind: str):
+               sha256: str, phash: str, width: int, height: int, kind: str,
+               blur: Optional[float] = None):
         self.conn.execute(
-            """INSERT INTO files(path,size,mtime,sha256,phash,width,height,kind)
-                   VALUES(?,?,?,?,?,?,?,?)
+            """INSERT INTO files(path,size,mtime,sha256,phash,width,height,kind,blur)
+                   VALUES(?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(path) DO UPDATE SET
                      size=excluded.size,
                      mtime=excluded.mtime,
@@ -46,9 +52,10 @@ class HashCache:
                      phash=excluded.phash,
                      width=excluded.width,
                      height=excluded.height,
-                     kind=excluded.kind
+                     kind=excluded.kind,
+                     blur=COALESCE(excluded.blur, files.blur)
             """,
-            (path, size, mtime, sha256, phash, width, height, kind)
+            (path, size, mtime, sha256, phash, width, height, kind, blur)
         )
 
     def commit(self):
