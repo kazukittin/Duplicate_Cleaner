@@ -3,12 +3,14 @@ from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QToolBar, QPushButton, QProgressBar, QMessageBox,
-    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView, QStackedWidget, QApplication
+    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView,
+    QStackedWidget, QApplication, QTabWidget
 )
 from .workers import ScanWorker
 from .models import ResultGroup, ResultItem
 from .thumbnails import ThumbnailProvider
 from .image_utils import format_bytes
+from .video_utils import is_video_path
 from send2trash import send2trash
 import os, stat, time
 
@@ -22,12 +24,32 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(self)
 
-        self.tree = QTreeWidget()
-        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.tree.setHeaderLabels(["選択", "種類", "スコア", "ブレ指標", "ファイル名", "解像度", "サイズ", "パス"])
-        self.tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.tree.header().setStretchLastSection(True)
-        self.tree.itemSelectionChanged.connect(self.on_select)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        tab_defs = [
+            ("similar", "類似（重複）"),
+            ("blur", "ブレ（ノイズ）"),
+            ("video", "映像"),
+        ]
+        self._tab_keys = [key for key, _ in tab_defs]
+        self._group_data = {}
+        self._path_items: dict[str, list[QTreeWidgetItem]] = {}
+
+        for key, title in tab_defs:
+            tree = self._create_tree()
+            tree.itemSelectionChanged.connect(self.on_select)
+            self.tabs.addTab(tree, title)
+            self._group_data[key] = {"tree": tree, "groups": [], "page": 0}
+
+        left_layout.addWidget(self.tabs)
+        splitter.addWidget(left_panel)
 
         right = QWidget()
         right_lay = QVBoxLayout(right)
@@ -68,7 +90,6 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.page_single)
         right_lay.addWidget(self.stack)
 
-        splitter.addWidget(self.tree)
         splitter.addWidget(right)
         splitter.setSizes([780, 500])
 
@@ -155,8 +176,14 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             QMessageBox.warning(self, "実行中", "スキャンは既に実行中だよ"); return
 
-        self.tree.clear(); self.preview.clear(); self.clear_compare(); self.progress.setValue(0)
-        self._all_groups = []; self._page = 0; self.btn_showmore.setEnabled(False)
+        self.preview.clear(); self.clear_compare(); self.progress.setValue(0)
+        self._all_groups = []; self._page = 0
+        self.btn_showmore.setEnabled(False)
+        self._path_items.clear()
+        for data in self._group_data.values():
+            data["tree"].clear()
+            data["groups"] = []
+            data["page"] = 0
 
         # ★ 追加：DBをスキャン対象フォルダ内に作る
         import os
@@ -182,22 +209,58 @@ class MainWindow(QMainWindow):
         self.lbl_progress_detail.setText("完了")
         self._all_groups = groups or []
         self._page = 0
-        self.tree.setUpdatesEnabled(False)
-        self.tree.clear()
-        self.tree.setUpdatesEnabled(True)
-        self.load_more()
-        self.btn_showmore.setEnabled(len(self._all_groups) > BATCH_SIZE)
+        for data in self._group_data.values():
+            tree = data["tree"]
+            tree.setUpdatesEnabled(False)
+            tree.clear()
+            tree.setUpdatesEnabled(True)
+            data["groups"] = []
+            data["page"] = 0
+        self._path_items.clear()
 
-    def load_more(self):
-        if not self._all_groups: return
-        start = self._page * BATCH_SIZE
-        end = min(len(self._all_groups), start + BATCH_SIZE)
+        categorized = {"similar": [], "blur": [], "video": []}
+        for g in self._all_groups:
+            if g.kind == "ブレ":
+                categorized["blur"].append(g)
+            elif any(is_video_path(it.path) for it in g.items):
+                categorized["video"].append(g)
+            else:
+                categorized["similar"].append(g)
+
+        for key, groups_list in categorized.items():
+            if key in self._group_data:
+                self._group_data[key]["groups"] = groups_list
+                self._group_data[key]["page"] = 0
+                self._group_data[key]["tree"].clear()
+
+        for key in self._tab_keys:
+            self.load_more(tab_key=key)
+
+        self._update_showmore_state()
+
+    def load_more(self, tab_key: str | None = None):
+        if tab_key is None:
+            tab_key = self.current_tab_key()
+        if tab_key not in self._group_data:
+            return
+        data = self._group_data[tab_key]
+        groups = data["groups"]
+        if not groups:
+            if tab_key == self.current_tab_key():
+                self.btn_showmore.setEnabled(False)
+            return
+        start = data["page"] * BATCH_SIZE
+        end = min(len(groups), start + BATCH_SIZE)
         if start >= end:
-            self.btn_showmore.setEnabled(False); return
-        self.tree.setUpdatesEnabled(False)
-        for g in self._all_groups[start:end]:
-            root = QTreeWidgetItem(["", g.kind, f"{g.score:.2f}" if g.score is not None else "-", "-", g.title, "", "", ""])
-            self.tree.addTopLevelItem(root)
+            if tab_key == self.current_tab_key():
+                self.btn_showmore.setEnabled(False)
+            return
+        tree = data["tree"]
+        tree.setUpdatesEnabled(False)
+        for g in groups[start:end]:
+            kind_label = "映像" if tab_key == "video" else g.kind
+            root = QTreeWidgetItem(["", kind_label, f"{g.score:.2f}" if g.score is not None else "-", "-", g.title, "", "", ""])
+            tree.addTopLevelItem(root)
             root.setFirstColumnSpanned(True)
             if g.kind == "ブレ":
                 keep = None
@@ -210,12 +273,14 @@ class MainWindow(QMainWindow):
                                           format_bytes(item.size), item.path])
                 child.setCheckState(0, Qt.Unchecked if item is keep else Qt.Checked)
                 root.addChild(child)
-        self.tree.setUpdatesEnabled(True)
-        self.tree.viewport().update()
+                self._register_item(item.path, child)
+        tree.setUpdatesEnabled(True)
+        tree.viewport().update()
         QApplication.processEvents()
-        self.tree.expandAll()
-        self._page += 1
-        self.btn_showmore.setEnabled(self._page * BATCH_SIZE < len(self._all_groups))
+        tree.expandAll()
+        data["page"] += 1
+        if tab_key == self.current_tab_key():
+            self._update_showmore_state()
 
     def update_stage(self, text: str):
         self.lbl_progress_detail.setText(text)
@@ -225,7 +290,12 @@ class MainWindow(QMainWindow):
         self.lbl_progress_detail.setText("エラー")
 
     def on_select(self):
-        items = self.tree.selectedItems()
+        tree = self.sender()
+        if not isinstance(tree, QTreeWidget):
+            tree = self.current_tree()
+        if tree is None:
+            return
+        items = tree.selectedItems()
         if not items: return
         file_rows = [it for it in items if os.path.isfile(it.text(7))]
         if len(file_rows) == 2 and file_rows[0].parent() is file_rows[1].parent():
@@ -281,20 +351,25 @@ class MainWindow(QMainWindow):
         except: pass
         try: self.clear_compare()
         except: pass
-        to_delete = []
-        for i in range(self.tree.topLevelItemCount()):
-            root = self.tree.topLevelItem(i)
-            for j in range(root.childCount()):
-                ch = root.child(j)
-                if ch.checkState(0) == Qt.Checked:
-                    p = ch.text(7)
-                    if p: to_delete.append((root, ch, p))
-        if not to_delete:
+        paths = []
+        seen = set()
+        for tree in self._iter_trees():
+            for i in range(tree.topLevelItemCount()):
+                root = tree.topLevelItem(i)
+                for j in range(root.childCount()):
+                    ch = root.child(j)
+                    if ch.checkState(0) == Qt.Checked:
+                        p = ch.text(7)
+                        if p and p not in seen:
+                            paths.append(p)
+                            seen.add(p)
+        if not paths:
             QMessageBox.information(self, "削除対象なし", "チェックが入ってないよ"); return
-        ok = QMessageBox.question(self, "確認", f"{len(to_delete)} 件をごみ箱へ移動するよ。OK？")
+        ok = QMessageBox.question(self, "確認", f"{len(paths)} 件をごみ箱へ移動するよ。OK？")
         if ok != QMessageBox.Yes: return
 
         errors = []; deleted = 0
+        removed_paths = []
         def win_long(path):
             if os.name == "nt":
                 ap = os.path.abspath(path)
@@ -303,17 +378,18 @@ class MainWindow(QMainWindow):
                 return ap
             return path
 
-        for root, ch, p in to_delete:
+        for p in paths:
             pp = win_long(p)
             try:
                 mode = os.stat(pp).st_mode
                 if not (mode & stat.S_IWUSR):
                     os.chmod(pp, stat.S_IWUSR | stat.S_IRUSR)
                 send2trash(pp); deleted += 1
-                parent = ch.parent(); idx = parent.indexOfChild(ch); parent.takeChild(idx)
+                removed_paths.append(p)
             except Exception as e1:
                 try:
                     os.remove(pp); deleted += 1
+                    removed_paths.append(p)
                 except Exception as e2:
                     errors.append((p, str(e1), str(e2)))
         if errors:
@@ -326,4 +402,65 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "一部失敗", f"{deleted} 件削除、{len(errors)} 件失敗\n詳細: dup_del_errors.log を確認してね\n{msg}")
         else:
             QMessageBox.information(self, "完了", f"{deleted} 件削除したよ！")
+        for p in removed_paths:
+            self._remove_path_everywhere(p)
         self.start_scan()
+
+    def _create_tree(self) -> QTreeWidget:
+        tree = QTreeWidget()
+        tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        tree.setHeaderLabels(["選択", "種類", "スコア", "ブレ指標", "ファイル名", "解像度", "サイズ", "パス"])
+        tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
+        tree.header().setStretchLastSection(True)
+        return tree
+
+    def current_tab_key(self) -> str:
+        idx = self.tabs.currentIndex()
+        if 0 <= idx < len(self._tab_keys):
+            return self._tab_keys[idx]
+        return "similar"
+
+    def current_tree(self) -> QTreeWidget | None:
+        key = self.current_tab_key()
+        data = self._group_data.get(key)
+        return data["tree"] if data else None
+
+    def on_tab_changed(self, index: int):
+        self.clear_compare()
+        self.preview.clear()
+        self._update_showmore_state()
+
+    def _iter_trees(self):
+        for key in self._tab_keys:
+            data = self._group_data.get(key)
+            if data:
+                yield data["tree"]
+
+    def _update_showmore_state(self):
+        key = self.current_tab_key()
+        data = self._group_data.get(key)
+        if not data or not data["groups"]:
+            self.btn_showmore.setEnabled(False)
+            return
+        has_more = data["page"] * BATCH_SIZE < len(data["groups"])
+        self.btn_showmore.setEnabled(has_more)
+
+    def _register_item(self, path: str, item: QTreeWidgetItem):
+        if not path:
+            return
+        self._path_items.setdefault(path, []).append(item)
+
+    def _remove_path_everywhere(self, path: str):
+        items = self._path_items.pop(path, [])
+        for item in items:
+            parent = item.parent()
+            if parent is None:
+                continue
+            tree = parent.treeWidget()
+            idx = parent.indexOfChild(item)
+            if idx >= 0:
+                parent.takeChild(idx)
+            if parent.childCount() == 0 and tree is not None:
+                top_idx = tree.indexOfTopLevelItem(parent)
+                if top_idx >= 0:
+                    tree.takeTopLevelItem(top_idx)
