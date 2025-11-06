@@ -1,7 +1,9 @@
-from PySide6.QtGui import QPixmap
+
+from PySide6.QtGui import QPixmap, QImage
 from PIL import Image
 import os
 import tempfile
+from .video_utils import is_video_path, first_frame_bgr
 
 class ThumbnailProvider:
     def __init__(self):
@@ -16,9 +18,18 @@ class ThumbnailProvider:
         tp = self.thumb_path(src)
         if not os.path.exists(tp):
             try:
-                with Image.open(src) as im:
-                    im.thumbnail((max_w, max_h))
-                    im.convert('RGB').save(tp, quality=85)
+                if is_video_path(src):
+                    import cv2
+                    frame = first_frame_bgr(src)
+                    if frame is None:
+                        return None
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    im = Image.fromarray(rgb)
+                else:
+                    im = Image.open(src)
+                im.thumbnail((max_w, max_h))
+                im = im.convert('RGB')
+                im.save(tp, quality=85)
             except Exception:
                 return None
         pix = QPixmap(tp)

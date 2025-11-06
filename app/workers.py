@@ -1,6 +1,8 @@
+
 from PySide6.QtCore import QThread, Signal
 import os
-from .image_utils import is_image_path, get_image_meta, sha256_file, phash_hex, laplacian_variance
+from .image_utils import is_image_path, get_image_meta, sha256_file as img_sha256, phash_hex, laplacian_variance
+from .video_utils import is_video_path, video_meta, sha256_file as vid_sha256, video_phash_hex
 from .models import ResultGroup, ResultItem
 
 class ScanWorker(QThread):
@@ -19,7 +21,7 @@ class ScanWorker(QThread):
             for root, _, fns in os.walk(self.folder):
                 for fn in fns:
                     p = os.path.join(root, fn)
-                    if is_image_path(p):
+                    if is_image_path(p) or is_video_path(p):
                         files.append(p)
             total = len(files)
             if total == 0:
@@ -27,55 +29,62 @@ class ScanWorker(QThread):
                 return
 
             items = []
-            hashes = {}
+            dup_groups_map = {}
+
             for i, p in enumerate(files, start=1):
-                meta = get_image_meta(p)
-                if not meta:
-                    continue
-                h = sha256_file(p)
-                it = ResultItem(path=p, size=meta['size'], width=meta['w'], height=meta['h'])
+                if is_image_path(p):
+                    meta = get_image_meta(p)
+                    if not meta: continue
+                    h = img_sha256(p)
+                    it = ResultItem(path=p, size=meta['size'], width=meta['w'], height=meta['h'])
+                else:
+                    meta = video_meta(p)
+                    if not meta: continue
+                    h = vid_sha256(p)
+                    it = ResultItem(path=p, size=meta['size'], width=meta['w'], height=meta['h'])
                 it.sha256 = h
                 items.append(it)
-                hashes.setdefault(h, []).append(it)
+                dup_groups_map.setdefault(h, []).append(it)
+
                 if i % 20 == 0:
                     self.sig_progress.emit(int(i/total*30))
 
-            groups: list[ResultGroup] = []
-            for h, arr in hashes.items():
+            groups = []
+            for h, arr in dup_groups_map.items():
                 if len(arr) > 1:
                     g = ResultGroup(kind="重複", title=f"SHA256 {h[:8]}...", items=arr, score=None)
+                    keep = max(arr, key=lambda it: (it.width*it.height, it.size))
+                    for it in arr:
+                        it.similarity = 1.0 if it is not keep else None
                     groups.append(g)
-
-            # Auto-select lower-res in duplicate groups (keep the largest resolution)
-            for g in groups:
-                if g.items:
-                    keep = max(g.items, key=lambda it: (it.pixels, it.size))
-                    for it in g.items:
-                        it.similarity = 1.0 if it is not keep else None  # mark others as delete candidates
 
             unique_items = [it for it in items if not any(it in g.items for g in groups)]
             for i, it in enumerate(unique_items, start=1):
-                it.phash = phash_hex(it.path)  # 16進64bit
+                if is_image_path(it.path):
+                    it.phash = phash_hex(it.path)
+                else:
+                    it.phash = video_phash_hex(it.path, samples=12)
                 if i % 20 == 0:
                     self.sig_progress.emit(30 + int(i/len(unique_items)*40))
 
-            MAX_SIM = 2000
+            MAX_SIM = 1200
             sim_groups = []
             if len(unique_items) <= MAX_SIM:
                 visited = set()
                 for i, a in enumerate(unique_items):
-                    if i in visited:
+                    if i in visited or not a.phash:
                         continue
                     grp = [a]
                     for j in range(i+1, len(unique_items)):
                         b = unique_items[j]
+                        if not b.phash:
+                            continue
                         if hamming(a.phash, b.phash) <= self.sim_thresh:
                             grp.append(b)
                             visited.add(j)
                     if len(grp) >= 2:
                         g = ResultGroup(kind="類似", title=f"pHash group {a.phash[:8]}", items=grp, score=1.0)
-                        # Auto-select lower-res (keep biggest)
-                        keep = max(grp, key=lambda it: (it.pixels, it.size))
+                        keep = max(grp, key=lambda it: (it.width*it.height, it.size))
                         for it in grp:
                             it.similarity = 1.0 if it is not keep else None
                         sim_groups.append(g)
@@ -83,7 +92,10 @@ class ScanWorker(QThread):
 
             for k, g in enumerate(groups, start=1):
                 for it in g.items:
-                    it.blur = laplacian_variance(it.path)
+                    if is_image_path(it.path):
+                        it.blur = laplacian_variance(it.path)
+                    else:
+                        it.blur = None
                 self.sig_progress.emit(70 + int(k/len(groups)*25))
 
             self.sig_progress.emit(100)
