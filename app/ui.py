@@ -3,7 +3,7 @@ from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QToolBar, QPushButton, QProgressBar, QMessageBox,
-    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame
+    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView, QStackedWidget, QAbstractItemView, QStackedWidget
 )
 from .workers import ScanWorker
 from .models import ResultGroup, ResultItem
@@ -18,22 +18,48 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DupSnap — Duplicate & Blurry Finder")
         self.resize(1280, 780)
 
+
         splitter = QSplitter(self)
+
+        # Left: tree
         self.tree = QTreeWidget()
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setHeaderLabels(["選択", "種類", "スコア", "ファイル名", "解像度", "サイズ", "パス"])
         self.tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tree.header().setStretchLastSection(True)
         self.tree.itemSelectionChanged.connect(self.on_select)
 
-        # Preview area: stacked - single image label + horizontal compare area
+        # Right: stacked pages (single / pair / group)
         right = QWidget()
         right_lay = QVBoxLayout(right)
+        self.stack = QStackedWidget()
+
+        # Page 1: single
+        self.page_single = QWidget()
+        ps_lay = QVBoxLayout(self.page_single)
         self.preview = QLabel("ここにプレビュー")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("background:#121212;color:#aaa;border:1px solid #333; min-height:300px;")
-        right_lay.addWidget(self.preview)
+        self.preview.setStyleSheet("background:#121212;color:#aaa;border:1px solid #333;")
+        ps_lay.addWidget(self.preview)
+        self.stack.addWidget(self.page_single)
 
-        # Horizontal compare scroller
+        # Page 2: pair compare
+        self.page_pair = QWidget()
+        pair_lay = QHBoxLayout(self.page_pair)
+        pair_lay.setContentsMargins(0,0,0,0)
+        self.preview_left = QLabel("左")
+        self.preview_left.setAlignment(Qt.AlignCenter)
+        self.preview_left.setStyleSheet("background:#101010;color:#aaa;border:1px dashed #333;")
+        self.preview_right = QLabel("右")
+        self.preview_right.setAlignment(Qt.AlignCenter)
+        self.preview_right.setStyleSheet("background:#101010;color:#aaa;border:1px dashed #333;")
+        pair_lay.addWidget(self.preview_left)
+        pair_lay.addWidget(self.preview_right)
+        self.stack.addWidget(self.page_pair)
+
+        # Page 3: group thumbnails
+        self.page_group = QWidget()
+        pg_lay = QVBoxLayout(self.page_group)
         self.compare_scroll = QScrollArea()
         self.compare_scroll.setWidgetResizable(True)
         self.compare_container = QWidget()
@@ -41,8 +67,11 @@ class MainWindow(QMainWindow):
         self.compare_layout.setContentsMargins(6,6,6,6)
         self.compare_layout.setSpacing(12)
         self.compare_scroll.setWidget(self.compare_container)
-        self.compare_scroll.setMinimumHeight(260)
-        right_lay.addWidget(self.compare_scroll)
+        pg_lay.addWidget(self.compare_scroll)
+        self.stack.addWidget(self.page_group)
+
+        self.stack.setCurrentWidget(self.page_single)
+        right_lay.addWidget(self.stack)
 
         splitter.addWidget(self.tree)
         splitter.addWidget(right)
@@ -100,6 +129,27 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.thumb = ThumbnailProvider()
 
+
+    def show_pair(self, path_left: str, path_right: str):
+        pix_l = self.thumb.get_pixmap(path_left, max_w=640, max_h=360)
+        pix_r = self.thumb.get_pixmap(path_right, max_w=640, max_h=360)
+        if pix_l:
+            self.preview_left.setPixmap(pix_l)
+        else:
+            self.preview_left.setText("左: プレビュー不可")
+        if pix_r:
+            self.preview_right.setPixmap(pix_r)
+        else:
+            self.preview_right.setText("右: プレビュー不可")
+        self.preview.setText("2枚比較モード")
+
+    def clear_pair(self):
+        self.preview_left.setText("左")
+        self.preview_left.setPixmap(QPixmap())
+        self.preview_right.setText("右")
+        self.preview_right.setPixmap(QPixmap())
+
+
     def on_thresh_changed(self, v: int):
         self.lbl_thresh.setText(str(v))
 
@@ -155,21 +205,34 @@ class MainWindow(QMainWindow):
         items = self.tree.selectedItems()
         if not items:
             return
+
+        # Exactly two file rows from same group -> Pair page
+        file_rows = [it for it in items if os.path.isfile(it.text(6))]
+        if len(file_rows) == 2:
+            p1 = file_rows[0].parent()
+            p2 = file_rows[1].parent()
+            if p1 is not None and p1 is p2:
+                self.show_pair(file_rows[0].text(6), file_rows[1].text(6))
+                self.stack.setCurrentWidget(self.page_pair)
+                self.clear_compare()
+                return
+
+        # Fallbacks
         it = items[0]
         path = it.text(6)
-        # If a file row selected -> single preview
         if os.path.isfile(path):
             pix = self.thumb.get_pixmap(path, max_w=900, max_h=520)
             if pix:
                 self.preview.setPixmap(pix)
             else:
                 self.preview.setText("プレビュー不可")
-            # Clear compare strip
             self.clear_compare()
+            self.clear_pair()
+            self.stack.setCurrentWidget(self.page_single)
         else:
-            # Group selected -> build horizontal compare thumbnails
-            self.preview.setText("グループ比較（横並び）")
             self.build_group_compare(it)
+            self.clear_pair()
+            self.stack.setCurrentWidget(self.page_group)
 
     def clear_compare(self):
         # remove all widgets from compare_layout

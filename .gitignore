@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Logs and debug
+*.log
+*.tmp
+*.bak
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# PyInstaller / Packaging
+build/
+dist/
+*.spec
+
+# IDE / Editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary thumbnails and caches
+dupsnap_thumb/
+__temp__/
+.cache/
+*.db
+
+# Test / export data
+*.csv
+*.xlsx
+*.zip
+
+# Ignore your screenshots or sample images
+test_images/
+samples/
