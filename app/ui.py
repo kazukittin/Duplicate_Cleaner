@@ -24,7 +24,7 @@ class MainWindow(QMainWindow):
 
         self.tree = QTreeWidget()
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.tree.setHeaderLabels(["選択", "種類", "スコア", "ファイル名", "解像度", "サイズ", "パス"])
+        self.tree.setHeaderLabels(["選択", "種類", "スコア", "ブレ指標", "ファイル名", "解像度", "サイズ", "パス"])
         self.tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tree.header().setStretchLastSection(True)
         self.tree.itemSelectionChanged.connect(self.on_select)
@@ -99,6 +99,16 @@ class MainWindow(QMainWindow):
         self.lbl_thresh = QLabel("5")
         tb.addWidget(self.lbl_thresh)
 
+        tb.addSeparator()
+        self.blur_slider = QSlider(Qt.Horizontal)
+        self.blur_slider.setMinimum(0); self.blur_slider.setMaximum(500); self.blur_slider.setValue(80)
+        self.blur_slider.setFixedWidth(160)
+        self.blur_slider.valueChanged.connect(self.on_blur_thresh_changed)
+        tb.addWidget(QLabel(" ブレしきい値："))
+        tb.addWidget(self.blur_slider)
+        self.lbl_blur_thresh = QLabel("80")
+        tb.addWidget(self.lbl_blur_thresh)
+
         self.btn_rescan = QPushButton("再スキャン")
         self.btn_rescan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_rescan)
@@ -127,6 +137,9 @@ class MainWindow(QMainWindow):
     def on_thresh_changed(self, v: int):
         self.lbl_thresh.setText(str(v))
 
+    def on_blur_thresh_changed(self, v: int):
+        self.lbl_blur_thresh.setText(str(v))
+
     def pick_folder(self):
         d = QFileDialog.getExistingDirectory(self, "対象フォルダを選択")
         if d:
@@ -150,7 +163,8 @@ class MainWindow(QMainWindow):
 
         sim_thresh = self.slider.value()
         # ★ db_path を渡す
-        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, db_path=db_path)
+        blur_thresh = self.blur_slider.value()
+        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, blur_thresh=blur_thresh, db_path=db_path)
         self.worker.sig_progress.connect(self.progress.setValue)
         self.worker.sig_finished.connect(self.on_scan_finished)
         self.worker.sig_error.connect(lambda msg: QMessageBox.critical(self, "エラー", msg))
@@ -176,12 +190,16 @@ class MainWindow(QMainWindow):
             self.btn_showmore.setEnabled(False); return
         self.tree.setUpdatesEnabled(False)
         for g in self._all_groups[start:end]:
-            root = QTreeWidgetItem(["", g.kind, f"{g.score:.2f}" if g.score else "-", g.title, "", "", ""])
+            root = QTreeWidgetItem(["", g.kind, f"{g.score:.2f}" if g.score is not None else "-", "-", g.title, "", "", ""])
             self.tree.addTopLevelItem(root)
             root.setFirstColumnSpanned(True)
-            keep = max(g.items, key=lambda it: (it.width*it.height, it.size)) if g.items else None
+            if g.kind == "ブレ":
+                keep = None
+            else:
+                keep = max(g.items, key=lambda it: (it.width*it.height, it.size)) if g.items else None
             for item in g.items:
-                child = QTreeWidgetItem(["", "ファイル", f"{item.similarity:.2f}" if item.similarity else "-",
+                child = QTreeWidgetItem(["", "ファイル", f"{item.similarity:.2f}" if item.similarity is not None else "-",
+                                          f"{item.blur:.1f}" if item.blur is not None else "-",
                                           os.path.basename(item.path), f"{item.width}x{item.height}",
                                           format_bytes(item.size), item.path])
                 child.setCheckState(0, Qt.Unchecked if item is keep else Qt.Checked)
@@ -196,12 +214,12 @@ class MainWindow(QMainWindow):
     def on_select(self):
         items = self.tree.selectedItems()
         if not items: return
-        file_rows = [it for it in items if os.path.isfile(it.text(6))]
+        file_rows = [it for it in items if os.path.isfile(it.text(7))]
         if len(file_rows) == 2 and file_rows[0].parent() is file_rows[1].parent():
-            self.show_pair(file_rows[0].text(6), file_rows[1].text(6))
+            self.show_pair(file_rows[0].text(7), file_rows[1].text(7))
             self.stack.setCurrentWidget(self.page_pair)
             return
-        it = items[0]; path = it.text(6)
+        it = items[0]; path = it.text(7)
         if os.path.isfile(path):
             pix = self.thumb.get_pixmap(path, max_w=900, max_h=520)
             if pix: self.preview.setPixmap(pix)
@@ -220,7 +238,7 @@ class MainWindow(QMainWindow):
     def build_group_compare(self, root_item):
         self.clear_compare()
         for j in range(root_item.childCount()):
-            ch = root_item.child(j); p = ch.text(6)
+            ch = root_item.child(j); p = ch.text(7)
             card = self.make_thumb_card(p, ch)
             if card: self.compare_layout.addWidget(card)
 
@@ -231,7 +249,7 @@ class MainWindow(QMainWindow):
         pix = self.thumb.get_pixmap(path, max_w=300, max_h=220)
         if pix: lbl.setPixmap(pix)
         else: lbl.setText("No preview")
-        meta = QLabel(f"{os.path.basename(path)}\n{row_item.text(4)}  {row_item.text(5)}")
+        meta = QLabel(f"{row_item.text(4)}\n{row_item.text(5)}  {row_item.text(6)}\nブレ指標: {row_item.text(3)}")
         meta.setStyleSheet("color:#bbb;")
         lay.addWidget(lbl); lay.addWidget(meta)
         w.setStyleSheet("background:#161616;border:1px solid #2a2a2a;border-radius:10px;")
@@ -256,7 +274,7 @@ class MainWindow(QMainWindow):
             for j in range(root.childCount()):
                 ch = root.child(j)
                 if ch.checkState(0) == Qt.Checked:
-                    p = ch.text(6)
+                    p = ch.text(7)
                     if p: to_delete.append((root, ch, p))
         if not to_delete:
             QMessageBox.information(self, "削除対象なし", "チェックが入ってないよ"); return

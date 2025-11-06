@@ -11,10 +11,11 @@ class ScanWorker(QThread):
     sig_finished = Signal(list)
     sig_error = Signal(str)
 
-    def __init__(self, folder: str, sim_thresh: int = 5, db_path: str = None):
+    def __init__(self, folder: str, sim_thresh: int = 5, blur_thresh: int = 80, db_path: str = None):
         super().__init__()
         self.folder = folder
         self.sim_thresh = sim_thresh
+        self.blur_thresh = blur_thresh
         self.db_path = db_path or os.path.join(os.getcwd(), "dupsnap_cache.db")
 
     def run(self):
@@ -140,14 +141,24 @@ class ScanWorker(QThread):
                 if processed % 20 == 0:
                     self.sig_progress.emit(55 + int(processed/total_b*35))
 
-            for k, g in enumerate(groups, start=1):
-                for it in g.items:
-                    if is_image_path(it.path):
-                        it.blur = laplacian_variance(it.path)
-                    else:
-                        it.blur = None
-                if k % 20 == 0:
-                    self.sig_progress.emit(95)
+            blur_candidates = []
+            img_items = [it for it in items if is_image_path(it.path)]
+            total_blur = max(1, len(img_items))
+            for idx, it in enumerate(img_items, start=1):
+                it.blur = laplacian_variance(it.path)
+                if self.blur_thresh and it.blur < self.blur_thresh:
+                    blur_candidates.append(it)
+                if idx % 20 == 0:
+                    self.sig_progress.emit(90 + int(idx / total_blur * 5))
+            for it in items:
+                if not is_image_path(it.path):
+                    it.blur = None
+
+            if self.blur_thresh and blur_candidates:
+                blur_candidates.sort(key=lambda it: it.blur if it.blur is not None else float('inf'))
+                min_blur = min((it.blur for it in blur_candidates if it.blur is not None), default=None)
+                title = f"ブレ疑い (< {self.blur_thresh})"
+                groups.append(ResultGroup(kind="ブレ", title=title, items=blur_candidates, score=min_blur))
 
             cache.commit()
             self.sig_progress.emit(100)
