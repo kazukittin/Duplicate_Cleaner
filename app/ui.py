@@ -313,8 +313,11 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.page_group)
 
     def clear_compare(self):
-        while self.compare_layout.count():
-            item = self.compare_layout.takeAt(0)
+        layout = getattr(self, "compare_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
             w = item.widget()
             if w: w.setParent(None)
 
