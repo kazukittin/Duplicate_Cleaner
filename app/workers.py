@@ -73,7 +73,7 @@ class ScanWorker(QThread):
                 kind = "img" if is_image_path(p) else ("vid" if is_video_path(p) else "other")
                 row = cache.get(p, size, mtime)
                 if row:
-                    sha256, ph, w, h, kind_cached = row
+                    sha256, ph, w, h, kind_cached, blur_cached = row
                     kind = kind_cached or kind
                     if w is None or h is None:
                         if kind == "img":
@@ -81,7 +81,8 @@ class ScanWorker(QThread):
                         else:
                             meta = video_meta(p) or {"w":0,"h":0,"size":size}
                         w, h = meta.get("w",0), meta.get("h",0)
-                        cache.upsert(p, size, mtime, sha256 or "", ph or "", w, h, kind)
+                        cache.upsert(p, size, mtime, sha256 or "", ph or "", w, h, kind, blur_cached)
+                    blur_val = blur_cached
                 else:
                     if kind == "img":
                         meta = get_image_meta(p)
@@ -95,9 +96,10 @@ class ScanWorker(QThread):
                         w, h = meta["w"], meta["h"]
                         sha256 = vid_sha256(p)
                         ph = ""
-                    cache.upsert(p, size, mtime, sha256, ph, w, h, kind)
+                    cache.upsert(p, size, mtime, sha256, ph, w, h, kind, None)
+                    blur_val = None
 
-                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0)
+                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0, blur=blur_val)
                 it.sha256 = sha256 or ""
                 items.append(it)
                 dup_groups_map.setdefault(it.sha256, []).append(it)
@@ -128,6 +130,9 @@ class ScanWorker(QThread):
                 except Exception:
                     row = None
                 ph = None
+                blur_cached = None
+                if row:
+                    blur_cached = row[5]
                 if row and row[1]:
                     ph = row[1]
                 else:
@@ -135,8 +140,11 @@ class ScanWorker(QThread):
                         ph = phash_hex(it.path)
                     else:
                         ph = video_phash_hex(it.path, samples=12)
-                    cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256, ph or "", it.width, it.height, "img" if is_image_path(it.path) else "vid")
+                    cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256, ph or "", it.width, it.height,
+                                 "img" if is_image_path(it.path) else "vid", it.blur)
                 it.phash = ph or ""
+                if it.blur is None and blur_cached is not None:
+                    it.blur = blur_cached
                 if i % 50 == 0:
                     cache.commit()
                     self.sig_progress.emit(20 + int(i/total2*35))
@@ -189,8 +197,15 @@ class ScanWorker(QThread):
             last_progress = 90
             for idx, it in enumerate(img_items, start=1):
                 emit_stage(f"ブレ判定 ({idx}/{blur_total})" if blur_total else "ブレ判定 (0/0)")
-                it.blur = laplacian_variance(it.path)
-                if self.blur_thresh and it.blur < self.blur_thresh:
+                if it.blur is None:
+                    it.blur = laplacian_variance(it.path)
+                    try:
+                        st = os.stat(it.path)
+                        cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256 or "", it.phash or "",
+                                     it.width, it.height, "img", it.blur)
+                    except Exception:
+                        pass
+                if self.blur_thresh and it.blur is not None and it.blur < self.blur_thresh:
                     blur_candidates.append(it)
                 progress = 90 + int(idx / total_blur * 5)
                 if progress > last_progress:
