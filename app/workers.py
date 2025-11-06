@@ -2,10 +2,28 @@
 from PySide6.QtCore import QThread, Signal
 import os
 import time
+import statistics
 from .image_utils import is_image_path, get_image_meta, sha256_file as img_sha256, phash_hex, laplacian_variance
 from .video_utils import is_video_path, video_meta, sha256_file as vid_sha256, video_phash_hex
 from .models import ResultGroup, ResultItem
 from .cache_db import HashCache
+
+
+def similarity_score_from_distance(dist: int | None) -> int | None:
+    if dist is None:
+        return None
+    score = 100.0 - (dist / 64.0) * 100.0
+    return int(max(1, min(100, round(score))))
+
+
+def blur_score_from_value(blur_value: float | None, threshold: float | None) -> int | None:
+    if blur_value is None or not threshold or threshold <= 0:
+        return None
+    severity = (threshold - blur_value) / threshold
+    if severity <= 0:
+        return None
+    score = severity * 100.0
+    return int(max(1, min(100, round(score))))
 
 class ScanWorker(QThread):
     sig_progress = Signal(int)
@@ -111,10 +129,10 @@ class ScanWorker(QThread):
             groups = []
             for h, arr in dup_groups_map.items():
                 if h and len(arr) > 1:
-                    g = ResultGroup(kind="重複", title=f"SHA256 {h[:8]}...", items=arr, score=None)
+                    g = ResultGroup(kind="重複", title=f"SHA256 {h[:8]}...", items=arr, score=100)
                     keep = max(arr, key=lambda it: (it.width*it.height, it.size))
                     for it in arr:
-                        it.similarity = 1.0 if it is not keep else None
+                        it.similarity = 100 if it is not keep else None
                     groups.append(g)
 
             unique_items = [it for it in items if not any(it in g.items for g in groups)]
@@ -170,31 +188,45 @@ class ScanWorker(QThread):
                 for i, a in enumerate(arr):
                     if i in visited or not a.phash:
                         continue
-                    grp = [a]
+                    members: list[ResultItem] = [a]
                     for j in range(i+1, len(arr)):
                         b = arr[j]
                         if not b.phash:
                             continue
-                        if hamming(a.phash, b.phash) <= self.sim_thresh:
-                            grp.append(b); visited.add(j)
-                    if len(grp) >= 2:
-                        keep = max(grp, key=lambda it: (it.width*it.height, it.size))
-                        for it2 in grp:
-                            it2.similarity = 1.0 if it2 is not keep else None
-                        groups.append(ResultGroup(kind="類似", title=f"pHash {prefix}", items=grp, score=1.0))
+                        dist = hamming(a.phash, b.phash)
+                        if dist <= self.sim_thresh:
+                            members.append(b)
+                            visited.add(j)
+                    if len(members) >= 2:
+                        grp_items = list(members)
+                        keep = max(grp_items, key=lambda it: (it.width*it.height, it.size))
+                        group_score = None
+                        for item in members:
+                            if item is keep:
+                                item.similarity = None
+                                continue
+                            dist = hamming(keep.phash, item.phash) if keep.phash and item.phash else None
+                            score = similarity_score_from_distance(dist)
+                            item.similarity = score
+                            if score is not None:
+                                group_score = score if group_score is None else max(group_score, score)
+                        if group_score is None:
+                            group_score = 100
+                        groups.append(ResultGroup(kind="類似", title=f"pHash {prefix}", items=grp_items, score=group_score))
+                    visited.add(i)
                 processed += 1
                 if bucket_total:
                     emit_stage(f"類似グループ化 ({processed}/{bucket_total})")
                 if processed % 20 == 0:
                     self.sig_progress.emit(55 + int(processed/total_b*35))
 
-            blur_candidates = []
             img_items = [it for it in items if is_image_path(it.path)]
             blur_total = len(img_items)
             if not blur_total:
                 emit_stage("ブレ判定 (0/0)", force=True)
             total_blur = max(1, blur_total)
             last_progress = 90
+            blur_values: list[float] = []
             for idx, it in enumerate(img_items, start=1):
                 emit_stage(f"ブレ判定 ({idx}/{blur_total})" if blur_total else "ブレ判定 (0/0)")
                 if it.blur is None:
@@ -205,8 +237,8 @@ class ScanWorker(QThread):
                                      it.width, it.height, "img", it.blur)
                     except Exception:
                         pass
-                if self.blur_thresh and it.blur is not None and it.blur < self.blur_thresh:
-                    blur_candidates.append(it)
+                if it.blur is not None:
+                    blur_values.append(it.blur)
                 progress = 90 + int(idx / total_blur * 5)
                 if progress > last_progress:
                     self.sig_progress.emit(progress)
@@ -215,11 +247,45 @@ class ScanWorker(QThread):
                 if not is_image_path(it.path):
                     it.blur = None
 
-            if self.blur_thresh and blur_candidates:
-                blur_candidates.sort(key=lambda it: it.blur if it.blur is not None else float('inf'))
-                min_blur = min((it.blur for it in blur_candidates if it.blur is not None), default=None)
-                title = f"ブレ疑い (< {self.blur_thresh})"
-                groups.append(ResultGroup(kind="ブレ", title=title, items=blur_candidates, score=min_blur))
+            blur_candidates: list[ResultItem] = []
+            dynamic_blur_threshold: float | None = None
+            if blur_values:
+                sorted_vals = sorted(v for v in blur_values if v is not None)
+                if sorted_vals:
+                    if len(sorted_vals) >= 4:
+                        q1 = statistics.quantiles(sorted_vals, n=4)[0]
+                    else:
+                        q1 = sorted_vals[0]
+                    dynamic_blur_threshold = q1
+                    if self.blur_thresh:
+                        dynamic_blur_threshold = min(dynamic_blur_threshold, float(self.blur_thresh))
+
+            candidate_threshold: float | None = dynamic_blur_threshold
+            if candidate_threshold is None and self.blur_thresh:
+                candidate_threshold = float(self.blur_thresh)
+
+            if candidate_threshold and candidate_threshold > 0:
+                for it in img_items:
+                    if it.blur is None or it.blur > candidate_threshold:
+                        continue
+                    severity = (candidate_threshold - it.blur) / candidate_threshold
+                    if severity <= 0.05:
+                        continue
+                    score = blur_score_from_value(it.blur, candidate_threshold)
+                    if score is None:
+                        continue
+                    it.blur_score = score
+                    blur_candidates.append(it)
+
+            if blur_candidates:
+                blur_candidates.sort(key=lambda it: it.blur_score if it.blur_score is not None else 0, reverse=True)
+                max_score = max((it.blur_score for it in blur_candidates if it.blur_score is not None), default=None)
+                threshold_for_title = candidate_threshold or self.blur_thresh
+                if threshold_for_title:
+                    title = f"ブレ疑い (≲ {int(round(threshold_for_title))})"
+                else:
+                    title = "ブレ疑い"
+                groups.append(ResultGroup(kind="ブレ", title=title, items=blur_candidates, score=max_score))
 
             cache.commit()
             self.sig_progress.emit(100)

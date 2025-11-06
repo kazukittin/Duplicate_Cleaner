@@ -10,7 +10,8 @@ class ResultItem:
     sha256: Optional[str] = None
     phash: Optional[str] = None
     blur: Optional[float] = None
-    similarity: Optional[float] = None
+    similarity: Optional[int] = None
+    blur_score: Optional[int] = None
 
     @property
     def pixels(self) -> int:

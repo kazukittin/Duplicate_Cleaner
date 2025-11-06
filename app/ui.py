@@ -130,15 +130,6 @@ class MainWindow(QMainWindow):
         self.lbl_blur_thresh = QLabel("80")
         tb.addWidget(self.lbl_blur_thresh)
 
-        self.btn_rescan = QPushButton("再スキャン")
-        self.btn_rescan.clicked.connect(self.start_scan)
-        tb.addWidget(self.btn_rescan)
-
-        self.btn_showmore: QPushButton | None = QPushButton("もっと表示")
-        self.btn_showmore.clicked.connect(self.load_more)
-        self.btn_showmore.setEnabled(False)
-        tb.addWidget(self.btn_showmore)
-
         self.btn_delete = QPushButton("選択を削除")
         self.btn_delete.clicked.connect(self.delete_checked)
         tb.addWidget(self.btn_delete)
@@ -178,9 +169,6 @@ class MainWindow(QMainWindow):
 
         self.preview.clear(); self.clear_compare(); self.progress.setValue(0)
         self._all_groups = []; self._page = 0
-        btn = getattr(self, "btn_showmore", None)
-        if btn is not None:
-            btn.setEnabled(False)
         self._path_items.clear()
         for data in self._group_data.values():
             data["tree"].clear()
@@ -230,40 +218,36 @@ class MainWindow(QMainWindow):
                 categorized["similar"].append(g)
 
         for key, groups_list in categorized.items():
+            if key in ("similar", "blur"):
+                groups_list.sort(key=lambda grp: grp.score if grp.score is not None else -1, reverse=True)
             if key in self._group_data:
                 self._group_data[key]["groups"] = groups_list
                 self._group_data[key]["page"] = 0
                 self._group_data[key]["tree"].clear()
 
         for key in self._tab_keys:
-            self.load_more(tab_key=key)
+            while self.load_more(tab_key=key):
+                pass
 
-        self._update_showmore_state()
-
-    def load_more(self, tab_key: str | None = None):
+    def load_more(self, tab_key: str | None = None) -> bool:
         if tab_key is None:
             tab_key = self.current_tab_key()
         if tab_key not in self._group_data:
-            return
+            return False
         data = self._group_data[tab_key]
         groups = data["groups"]
         if not groups:
-            btn = getattr(self, "btn_showmore", None)
-            if tab_key == self.current_tab_key() and btn is not None:
-                btn.setEnabled(False)
-            return
+            return False
         start = data["page"] * BATCH_SIZE
         end = min(len(groups), start + BATCH_SIZE)
         if start >= end:
-            btn = getattr(self, "btn_showmore", None)
-            if tab_key == self.current_tab_key() and btn is not None:
-                btn.setEnabled(False)
-            return
+            return False
         tree = data["tree"]
         tree.setUpdatesEnabled(False)
         for g in groups[start:end]:
             kind_label = "映像" if tab_key == "video" else g.kind
-            root = QTreeWidgetItem(["", kind_label, f"{g.score:.2f}" if g.score is not None else "-", "-", g.title, "", "", ""])
+            score_text = str(int(round(g.score))) if g.score is not None else "-"
+            root = QTreeWidgetItem(["", kind_label, score_text, "-", g.title, "", "", ""])
             tree.addTopLevelItem(root)
             root.setFirstColumnSpanned(True)
             if g.kind == "ブレ":
@@ -271,8 +255,10 @@ class MainWindow(QMainWindow):
             else:
                 keep = max(g.items, key=lambda it: (it.width*it.height, it.size)) if g.items else None
             for item in g.items:
-                child = QTreeWidgetItem(["", "ファイル", f"{item.similarity:.2f}" if item.similarity is not None else "-",
-                                          f"{item.blur:.1f}" if item.blur is not None else "-",
+                sim_text = str(int(round(item.similarity))) if item.similarity is not None else "-"
+                blur_text = str(int(round(item.blur_score))) if getattr(item, "blur_score", None) is not None else "-"
+                child = QTreeWidgetItem(["", "ファイル", sim_text,
+                                          blur_text,
                                           os.path.basename(item.path), f"{item.width}x{item.height}",
                                           format_bytes(item.size), item.path])
                 child.setCheckState(0, Qt.Unchecked if item is keep else Qt.Checked)
@@ -283,8 +269,7 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         tree.expandAll()
         data["page"] += 1
-        if tab_key == self.current_tab_key():
-            self._update_showmore_state()
+        return True
 
     def update_stage(self, text: str):
         self.lbl_progress_detail.setText(text)
@@ -437,26 +422,12 @@ class MainWindow(QMainWindow):
         preview = getattr(self, "preview", None)
         if preview is not None:
             preview.clear()
-        if hasattr(self, "btn_showmore"):
-            self._update_showmore_state()
 
     def _iter_trees(self):
         for key in self._tab_keys:
             data = self._group_data.get(key)
             if data:
                 yield data["tree"]
-
-    def _update_showmore_state(self):
-        btn = getattr(self, "btn_showmore", None)
-        if btn is None:
-            return
-        key = self.current_tab_key()
-        data = self._group_data.get(key)
-        if not data or not data["groups"]:
-            btn.setEnabled(False)
-            return
-        has_more = data["page"] * BATCH_SIZE < len(data["groups"])
-        btn.setEnabled(has_more)
 
     def _register_item(self, path: str, item: QTreeWidgetItem):
         if not path:
