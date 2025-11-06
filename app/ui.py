@@ -125,6 +125,9 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar(self)
         self.statusBar().addPermanentWidget(self.progress, 1)
         self.progress.setValue(0)
+        self.lbl_progress_detail = QLabel("待機中")
+        self.lbl_progress_detail.setStyleSheet("color:#ddd;padding-left:8px;")
+        self.statusBar().addPermanentWidget(self.lbl_progress_detail)
 
         self.setStyle(QStyleFactory.create("Fusion"))
         self.folder = None
@@ -166,14 +169,17 @@ class MainWindow(QMainWindow):
         blur_thresh = self.blur_slider.value()
         self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, blur_thresh=blur_thresh, db_path=db_path)
         self.worker.sig_progress.connect(self.progress.setValue)
+        self.worker.sig_stage.connect(self.update_stage)
         self.worker.sig_finished.connect(self.on_scan_finished)
-        self.worker.sig_error.connect(lambda msg: QMessageBox.critical(self, "エラー", msg))
+        self.worker.sig_error.connect(self.on_scan_error)
         self.worker.start()
         self.statusBar().showMessage("スキャン中…")
+        self.lbl_progress_detail.setText("準備中…")
 
 
     def on_scan_finished(self, groups):
         self.statusBar().showMessage("解析完了")
+        self.lbl_progress_detail.setText("完了")
         self._all_groups = groups or []
         self._page = 0
         self.tree.setUpdatesEnabled(False)
@@ -210,6 +216,13 @@ class MainWindow(QMainWindow):
         self.tree.expandAll()
         self._page += 1
         self.btn_showmore.setEnabled(self._page * BATCH_SIZE < len(self._all_groups))
+
+    def update_stage(self, text: str):
+        self.lbl_progress_detail.setText(text)
+
+    def on_scan_error(self, msg: str):
+        QMessageBox.critical(self, "エラー", msg)
+        self.lbl_progress_detail.setText("エラー")
 
     def on_select(self):
         items = self.tree.selectedItems()

@@ -10,6 +10,7 @@ class ScanWorker(QThread):
     sig_progress = Signal(int)
     sig_finished = Signal(list)
     sig_error = Signal(str)
+    sig_stage = Signal(str)
 
     def __init__(self, folder: str, sim_thresh: int = 5, blur_thresh: int = 80, db_path: str = None):
         super().__init__()
@@ -23,6 +24,7 @@ class ScanWorker(QThread):
         try:
             cache = HashCache(self.db_path)
             files = []
+            self.sig_stage.emit("ファイル収集中…")
             for root, _, fns in os.walk(self.folder):
                 for fn in fns:
                     p = os.path.join(root, fn)
@@ -35,6 +37,7 @@ class ScanWorker(QThread):
 
             total = len(files)
             if total == 0:
+                self.sig_stage.emit("対象ファイルなし (0/0)")
                 self.sig_finished.emit([])
                 return
 
@@ -42,6 +45,7 @@ class ScanWorker(QThread):
             dup_groups_map = {}
 
             for i, (p, size, mtime) in enumerate(files, start=1):
+                self.sig_stage.emit(f"メタデータ取得中 ({i}/{total})")
                 kind = "img" if is_image_path(p) else ("vid" if is_video_path(p) else "other")
                 row = cache.get(p, size, mtime)
                 if row:
@@ -88,8 +92,12 @@ class ScanWorker(QThread):
                     groups.append(g)
 
             unique_items = [it for it in items if not any(it in g.items for g in groups)]
-            total2 = max(1, len(unique_items))
+            unique_total = len(unique_items)
+            if not unique_total:
+                self.sig_stage.emit("類似判定準備中 (0/0)")
+            total2 = max(1, unique_total)
             for i, it in enumerate(unique_items, start=1):
+                self.sig_stage.emit(f"類似判定準備中 ({i}/{unique_total})" if unique_total else "類似判定準備中 (0/0)")
                 try:
                     st = os.stat(it.path)
                     row = cache.get(it.path, st.st_size, st.st_mtime)
@@ -116,10 +124,15 @@ class ScanWorker(QThread):
                     buckets[it.phash[:4]].append(it)
 
             processed = 0
-            total_b = max(1, len(buckets))
+            bucket_total = len(buckets)
+            if not bucket_total:
+                self.sig_stage.emit("類似グループ化 (0/0)")
+            total_b = max(1, bucket_total)
             for prefix, arr in buckets.items():
                 if len(arr) < 2:
                     processed += 1
+                    if bucket_total:
+                        self.sig_stage.emit(f"類似グループ化 ({processed}/{bucket_total})")
                     continue
                 visited = set()
                 for i, a in enumerate(arr):
@@ -138,14 +151,20 @@ class ScanWorker(QThread):
                             it2.similarity = 1.0 if it2 is not keep else None
                         groups.append(ResultGroup(kind="類似", title=f"pHash {prefix}", items=grp, score=1.0))
                 processed += 1
+                if bucket_total:
+                    self.sig_stage.emit(f"類似グループ化 ({processed}/{bucket_total})")
                 if processed % 20 == 0:
                     self.sig_progress.emit(55 + int(processed/total_b*35))
 
             blur_candidates = []
             img_items = [it for it in items if is_image_path(it.path)]
-            total_blur = max(1, len(img_items))
+            blur_total = len(img_items)
+            if not blur_total:
+                self.sig_stage.emit("ブレ判定 (0/0)")
+            total_blur = max(1, blur_total)
             last_progress = 90
             for idx, it in enumerate(img_items, start=1):
+                self.sig_stage.emit(f"ブレ判定 ({idx}/{blur_total})" if blur_total else "ブレ判定 (0/0)")
                 it.blur = laplacian_variance(it.path)
                 if self.blur_thresh and it.blur < self.blur_thresh:
                     blur_candidates.append(it)
@@ -165,6 +184,7 @@ class ScanWorker(QThread):
 
             cache.commit()
             self.sig_progress.emit(100)
+            self.sig_stage.emit("完了")
             self.sig_finished.emit(groups)
         except Exception as e:
             self.sig_error.emit(str(e))
