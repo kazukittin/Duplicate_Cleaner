@@ -138,15 +138,25 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "フォルダ未選択", "先に対象フォルダを選んでね"); return
         if self.worker and self.worker.isRunning():
             QMessageBox.warning(self, "実行中", "スキャンは既に実行中だよ"); return
+
         self.tree.clear(); self.preview.clear(); self.clear_compare(); self.progress.setValue(0)
         self._all_groups = []; self._page = 0; self.btn_showmore.setEnabled(False)
+
+        # ★ 追加：DBをスキャン対象フォルダ内に作る
+        import os
+        db_dir = os.path.join(self.folder, ".dupsnap")
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, "cache.db")
+
         sim_thresh = self.slider.value()
-        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh)
+        # ★ db_path を渡す
+        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, db_path=db_path)
         self.worker.sig_progress.connect(self.progress.setValue)
         self.worker.sig_finished.connect(self.on_scan_finished)
         self.worker.sig_error.connect(lambda msg: QMessageBox.critical(self, "エラー", msg))
         self.worker.start()
         self.statusBar().showMessage("スキャン中…")
+
 
     def on_scan_finished(self, groups):
         self.statusBar().showMessage("解析完了")
