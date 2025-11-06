@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         return w
 
     def delete_checked(self):
-        to_delete = []
+        to_delete: list[str] = []
         for i in range(self.tree.topLevelItemCount()):
             root = self.tree.topLevelItem(i)
             for j in range(root.childCount()):
@@ -288,17 +288,45 @@ class MainWindow(QMainWindow):
         if not to_delete:
             QMessageBox.information(self, "削除対象なし", "チェックが入ってないよ")
             return
-        ok = QMessageBox.question(self, "確認", f"{len(to_delete)} 件をごみ箱へ移動するよ。OK？")
+        unique_paths: list[str] = []
+        seen: set[str] = set()
+        for p in to_delete:
+            if p in seen:
+                continue
+            seen.add(p)
+            unique_paths.append(p)
+
+        deduped = len(unique_paths)
+        duplicate_entries = len(to_delete) - deduped
+        confirm_msg = f"{deduped} 件をごみ箱へ移動するよ。OK？"
+        if duplicate_entries:
+            confirm_msg = (
+                f"{deduped} 件をごみ箱へ移動するよ。"
+                f"(同じファイルが {duplicate_entries} 回選択されていたからまとめたよ) OK？"
+            )
+
+        ok = QMessageBox.question(self, "確認", confirm_msg)
         if ok != QMessageBox.Yes:
             return
-        failed = 0
-        for p in to_delete:
+        failures: list[tuple[str, str]] = []
+        for p in unique_paths:
             try:
                 send2trash(p)
-            except Exception:
-                failed += 1
-        if failed:
-            QMessageBox.warning(self, "一部失敗", f"{failed} 件は削除に失敗したよ")
+            except Exception as exc:  # pragma: no cover - depends on OS backend
+                failures.append((p, str(exc)))
+        if failures:
+            details_lines = [f"{os.path.basename(p)}: {err}" for p, err in failures[:5]]
+            if len(failures) > 5:
+                details_lines.append("…")
+            details = "\n".join(details_lines)
+            QMessageBox.warning(
+                self,
+                "一部失敗",
+                f"{len(failures)} 件は削除に失敗したよ\n{details}",
+            )
         else:
-            QMessageBox.information(self, "完了", "削除したよ！")
+            extra = ""
+            if duplicate_entries:
+                extra = "\n(同じファイルへの重複指定はスキップしたよ)"
+            QMessageBox.information(self, "完了", f"削除したよ！{extra}")
         self.start_scan()
