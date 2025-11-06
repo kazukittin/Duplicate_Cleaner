@@ -1,16 +1,17 @@
+
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QToolBar, QPushButton, QProgressBar, QMessageBox,
-    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView, QStackedWidget, QAbstractItemView, QStackedWidget
+    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView, QStackedWidget
 )
 from .workers import ScanWorker
 from .models import ResultGroup, ResultItem
 from .thumbnails import ThumbnailProvider
 from .image_utils import format_bytes
 from send2trash import send2trash
-import os
+import os, stat, time
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -18,10 +19,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DupSnap — Duplicate & Blurry Finder")
         self.resize(1280, 780)
 
-
         splitter = QSplitter(self)
 
-        # Left: tree
+        # Left side: file tree
         self.tree = QTreeWidget()
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setHeaderLabels(["選択", "種類", "スコア", "ファイル名", "解像度", "サイズ", "パス"])
@@ -29,12 +29,12 @@ class MainWindow(QMainWindow):
         self.tree.header().setStretchLastSection(True)
         self.tree.itemSelectionChanged.connect(self.on_select)
 
-        # Right: stacked pages (single / pair / group)
+        # Right side: stacked views (single/pair/group)
         right = QWidget()
         right_lay = QVBoxLayout(right)
         self.stack = QStackedWidget()
 
-        # Page 1: single
+        # Single preview page
         self.page_single = QWidget()
         ps_lay = QVBoxLayout(self.page_single)
         self.preview = QLabel("ここにプレビュー")
@@ -43,21 +43,20 @@ class MainWindow(QMainWindow):
         ps_lay.addWidget(self.preview)
         self.stack.addWidget(self.page_single)
 
-        # Page 2: pair compare
+        # Pair compare page
         self.page_pair = QWidget()
         pair_lay = QHBoxLayout(self.page_pair)
-        pair_lay.setContentsMargins(0,0,0,0)
         self.preview_left = QLabel("左")
         self.preview_left.setAlignment(Qt.AlignCenter)
-        self.preview_left.setStyleSheet("background:#101010;color:#aaa;border:1px dashed #333;")
         self.preview_right = QLabel("右")
         self.preview_right.setAlignment(Qt.AlignCenter)
-        self.preview_right.setStyleSheet("background:#101010;color:#aaa;border:1px dashed #333;")
+        for lbl in (self.preview_left, self.preview_right):
+            lbl.setStyleSheet("background:#101010;color:#aaa;border:1px dashed #333;")
         pair_lay.addWidget(self.preview_left)
         pair_lay.addWidget(self.preview_right)
         self.stack.addWidget(self.page_pair)
 
-        # Page 3: group thumbnails
+        # Group thumbnails page
         self.page_group = QWidget()
         pg_lay = QVBoxLayout(self.page_group)
         self.compare_scroll = QScrollArea()
@@ -94,12 +93,11 @@ class MainWindow(QMainWindow):
         self.btn_scan.clicked.connect(self.start_scan)
         tb.addWidget(self.btn_scan)
 
-        # Similarity threshold slider
         tb.addSeparator()
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(20)
-        self.slider.setValue(5) # default
+        self.slider.setValue(5)
         self.slider.setFixedWidth(160)
         self.slider.valueChanged.connect(self.on_thresh_changed)
         tb.addWidget(QLabel(" 類似しきい値(Hamming)："))
@@ -120,35 +118,9 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
 
         self.setStyle(QStyleFactory.create("Fusion"))
-        style_path = os.path.join(os.path.dirname(__file__), "styles.qss")
-        if os.path.exists(style_path):
-            with open(style_path, "r", encoding="utf8") as f:
-                self.setStyleSheet(f.read())
-
         self.folder = None
         self.worker = None
         self.thumb = ThumbnailProvider()
-
-
-    def show_pair(self, path_left: str, path_right: str):
-        pix_l = self.thumb.get_pixmap(path_left, max_w=640, max_h=360)
-        pix_r = self.thumb.get_pixmap(path_right, max_w=640, max_h=360)
-        if pix_l:
-            self.preview_left.setPixmap(pix_l)
-        else:
-            self.preview_left.setText("左: プレビュー不可")
-        if pix_r:
-            self.preview_right.setPixmap(pix_r)
-        else:
-            self.preview_right.setText("右: プレビュー不可")
-        self.preview.setText("2枚比較モード")
-
-    def clear_pair(self):
-        self.preview_left.setText("左")
-        self.preview_left.setPixmap(QPixmap())
-        self.preview_right.setText("右")
-        self.preview_right.setPixmap(QPixmap())
-
 
     def on_thresh_changed(self, v: int):
         self.lbl_thresh.setText(str(v))
@@ -182,21 +154,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("解析完了")
         self.populate_tree(groups)
 
-    def populate_tree(self, groups: list[ResultGroup]):
+    def populate_tree(self, groups):
         for g in groups:
-            root = QTreeWidgetItem(["", g.kind, f"{g.score:.2f}" if g.score else "-", f"{g.title}", "", "", ""])
+            root = QTreeWidgetItem(["", g.kind, f"{g.score:.2f}" if g.score else "-", g.title, "", "", ""])
             self.tree.addTopLevelItem(root)
             root.setFirstColumnSpanned(True)
-            # decide keep (largest) for checkmarks
             if g.items:
                 keep = max(g.items, key=lambda it: (it.pixels, it.size))
             else:
                 keep = None
             for item in g.items:
-                child = QTreeWidgetItem(["", "ファイル", f"{item.similarity:.2f}" if item.similarity is not None else "-",
-                                          os.path.basename(item.path), f"{item.width}x{item.height}",
+                child = QTreeWidgetItem(["", "ファイル", f"{item.similarity:.2f}" if item.similarity else "-", 
+                                          os.path.basename(item.path), f"{item.width}x{item.height}", 
                                           format_bytes(item.size), item.path])
-                # auto-check lower-res for deletion, keep biggest unchecked
                 child.setCheckState(0, Qt.Unchecked if item is keep else Qt.Checked)
                 root.addChild(child)
         self.tree.expandAll()
@@ -205,46 +175,31 @@ class MainWindow(QMainWindow):
         items = self.tree.selectedItems()
         if not items:
             return
-
-        # Exactly two file rows from same group -> Pair page
         file_rows = [it for it in items if os.path.isfile(it.text(6))]
-        if len(file_rows) == 2:
-            p1 = file_rows[0].parent()
-            p2 = file_rows[1].parent()
-            if p1 is not None and p1 is p2:
-                self.show_pair(file_rows[0].text(6), file_rows[1].text(6))
-                self.stack.setCurrentWidget(self.page_pair)
-                self.clear_compare()
-                return
-
-        # Fallbacks
+        if len(file_rows) == 2 and file_rows[0].parent() is file_rows[1].parent():
+            self.show_pair(file_rows[0].text(6), file_rows[1].text(6))
+            self.stack.setCurrentWidget(self.page_pair)
+            return
         it = items[0]
         path = it.text(6)
         if os.path.isfile(path):
             pix = self.thumb.get_pixmap(path, max_w=900, max_h=520)
-            if pix:
-                self.preview.setPixmap(pix)
-            else:
-                self.preview.setText("プレビュー不可")
-            self.clear_compare()
-            self.clear_pair()
+            if pix: self.preview.setPixmap(pix)
+            else: self.preview.setText("プレビュー不可")
             self.stack.setCurrentWidget(self.page_single)
         else:
             self.build_group_compare(it)
-            self.clear_pair()
             self.stack.setCurrentWidget(self.page_group)
 
     def clear_compare(self):
-        # remove all widgets from compare_layout
         while self.compare_layout.count():
             item = self.compare_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.setParent(None)
 
-    def build_group_compare(self, root_item: QTreeWidgetItem):
+    def build_group_compare(self, root_item):
         self.clear_compare()
-        # create small cards for each child
         for j in range(root_item.childCount()):
             ch = root_item.child(j)
             p = ch.text(6)
@@ -252,30 +207,36 @@ class MainWindow(QMainWindow):
             if card:
                 self.compare_layout.addWidget(card)
 
-        spacer = QFrame()
-        spacer.setFrameShape(QFrame.NoFrame)
-        self.compare_layout.addWidget(spacer)
-
-    def make_thumb_card(self, path: str, row_item: QTreeWidgetItem):
-        if not os.path.isfile(path):
-            return None
+    def make_thumb_card(self, path, row_item):
+        if not os.path.isfile(path): return None
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(6,6,6,6)
         lbl = QLabel()
         pix = self.thumb.get_pixmap(path, max_w=300, max_h=220)
-        if pix:
-            lbl.setPixmap(pix)
-        else:
-            lbl.setText("No preview")
+        if pix: lbl.setPixmap(pix)
+        else: lbl.setText("No preview")
         meta = QLabel(f"{os.path.basename(path)}\n{row_item.text(4)}  {row_item.text(5)}")
         meta.setStyleSheet("color:#bbb;")
-        lay.addWidget(lbl)
-        lay.addWidget(meta)
+        lay.addWidget(lbl); lay.addWidget(meta)
         w.setStyleSheet("background:#161616;border:1px solid #2a2a2a;border-radius:10px;")
         return w
 
+    def show_pair(self, path_left, path_right):
+        pix_l = self.thumb.get_pixmap(path_left, max_w=640, max_h=540)
+        pix_r = self.thumb.get_pixmap(path_right, max_w=640, max_h=540)
+        if pix_l: self.preview_left.setPixmap(pix_l)
+        else: self.preview_left.setText("左: プレビュー不可")
+        if pix_r: self.preview_right.setPixmap(pix_r)
+        else: self.preview_right.setText("右: プレビュー不可")
+
     def delete_checked(self):
+        try: self.preview.clear()
+        except: pass
+        try: self.clear_pair()
+        except: pass
+        try: self.clear_compare()
+        except: pass
+
         to_delete = []
         for i in range(self.tree.topLevelItemCount()):
             root = self.tree.topLevelItem(i)
@@ -284,21 +245,51 @@ class MainWindow(QMainWindow):
                 if ch.checkState(0) == Qt.Checked:
                     p = ch.text(6)
                     if p:
-                        to_delete.append(p)
+                        to_delete.append((root, ch, p))
         if not to_delete:
             QMessageBox.information(self, "削除対象なし", "チェックが入ってないよ")
             return
         ok = QMessageBox.question(self, "確認", f"{len(to_delete)} 件をごみ箱へ移動するよ。OK？")
-        if ok != QMessageBox.Yes:
-            return
-        failed = 0
-        for p in to_delete:
+        if ok != QMessageBox.Yes: return
+
+        errors = []
+        deleted = 0
+        def win_long(path):
+            if os.name == "nt":
+                ap = os.path.abspath(path)
+                if not ap.startswith('\\?\\') and len(ap) > 240:
+                    return '\\?\\' + ap.replace('/', '\\')
+                return ap
+            return path
+
+        for root, ch, p in to_delete:
+            pp = win_long(p)
             try:
-                send2trash(p)
-            except Exception:
-                failed += 1
-        if failed:
-            QMessageBox.warning(self, "一部失敗", f"{failed} 件は削除に失敗したよ")
+                mode = os.stat(pp).st_mode
+                if not (mode & stat.S_IWUSR):
+                    os.chmod(pp, stat.S_IWUSR | stat.S_IRUSR)
+                send2trash(pp)
+                deleted += 1
+                parent = ch.parent()
+                idx = parent.indexOfChild(ch)
+                parent.takeChild(idx)
+            except Exception as e1:
+                try:
+                    os.remove(pp)
+                    deleted += 1
+                except Exception as e2:
+                    errors.append((p, str(e1), str(e2)))
+
+        if errors:
+            log_path = os.path.join(os.getcwd(), "dup_del_errors.log")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                for p, e1, e2 in errors:
+                    lf.write(f"{p}\n -> {e1}\n -> fallback {e2}\n")
+            msg = "\n".join([os.path.basename(p) for p, _, _ in errors[:3]])
+            if len(errors) > 3: msg += f"\n…ほか {len(errors)-3} 件"
+            QMessageBox.warning(self, "一部失敗",
+                f"{deleted} 件削除、{len(errors)} 件失敗\n詳細: dup_del_errors.log を確認してね\n{msg}")
         else:
-            QMessageBox.information(self, "完了", "削除したよ！")
+            QMessageBox.information(self, "完了", f"{deleted} 件削除したよ！")
         self.start_scan()
