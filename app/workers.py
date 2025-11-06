@@ -2,6 +2,7 @@
 from PySide6.QtCore import QThread, Signal
 import os
 import time
+import math
 from .image_utils import (
     is_image_path,
     get_image_meta,
@@ -25,9 +26,12 @@ def noise_score_from_value(noise_value: float | None, threshold: float | None) -
     if noise_value is None or not threshold or threshold <= 0:
         return None
     severity = (noise_value - threshold) / threshold
-    if severity <= 0:
+    if severity < 0:
         return None
-    score = severity * 100.0
+    if severity == 0:
+        score = 1.0
+    else:
+        score = severity * 100.0
     return int(max(1, min(100, round(score))))
 
 class ScanWorker(QThread):
@@ -37,8 +41,8 @@ class ScanWorker(QThread):
     sig_stage = Signal(str)
 
     NOISE_LEVELS = {
-        "weak": 0.9,
-        "medium": 0.75,
+        "weak": 0.1,
+        "medium": 0.3,
         "strong": 0.6,
     }
 
@@ -261,26 +265,19 @@ class ScanWorker(QThread):
             noise_candidates: list[ResultItem] = []
             dynamic_noise_threshold: float | None = None
             if noise_values:
-                sorted_vals = sorted(v for v in noise_values if v is not None)
-                if sorted_vals:
-                    q = self.NOISE_LEVELS.get(self.noise_level, 0.75)
-                    if len(sorted_vals) == 1:
-                        dynamic_noise_threshold = sorted_vals[0]
-                    else:
-                        idx = (len(sorted_vals) - 1) * q
-                        low = int(idx)
-                        high = min(len(sorted_vals) - 1, low + 1)
-                        frac = idx - low
-                        if low == high:
-                            dynamic_noise_threshold = sorted_vals[low]
-                        else:
-                            dynamic_noise_threshold = sorted_vals[low] + (sorted_vals[high] - sorted_vals[low]) * frac
+                positive_vals = sorted(v for v in noise_values if v is not None and v > 0)
+                if positive_vals:
+                    frac = self.NOISE_LEVELS.get(self.noise_level, 0.3)
+                    count = len(positive_vals)
+                    take = max(1, math.ceil(count * frac))
+                    idx = max(0, count - take)
+                    dynamic_noise_threshold = positive_vals[idx]
 
             candidate_threshold: float | None = dynamic_noise_threshold
 
             if candidate_threshold and candidate_threshold > 0:
                 for it in img_items:
-                    if it.noise is None or it.noise <= candidate_threshold:
+                    if it.noise is None or it.noise < candidate_threshold:
                         continue
                     score = noise_score_from_value(it.noise, candidate_threshold)
                     if score is None:
