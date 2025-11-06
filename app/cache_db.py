@@ -24,26 +24,28 @@ class HashCache:
           width  INTEGER,
           height INTEGER,
           kind   TEXT,
-          blur   REAL
+          noise  REAL
         );
         CREATE INDEX IF NOT EXISTS idx_prefix ON files(substr(phash,1,4));
         """ )
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(files)")}
-        if "blur" not in cols:
-            self.conn.execute("ALTER TABLE files ADD COLUMN blur REAL")
+        if "noise" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN noise REAL")
+        if "blur" in cols:
+            self.conn.execute("UPDATE files SET noise = COALESCE(noise, blur) WHERE blur IS NOT NULL")
 
     def get(self, path: str, size: int, mtime: float):
         cur = self.conn.execute(
-            "SELECT sha256, phash, width, height, kind, blur FROM files WHERE path=? AND size=? AND mtime=?",
+            "SELECT sha256, phash, width, height, kind, noise FROM files WHERE path=? AND size=? AND mtime=?",
             (path, size, mtime)
         )
         return cur.fetchone()
 
     def upsert(self, path: str, size: int, mtime: float,
                sha256: str, phash: str, width: int, height: int, kind: str,
-               blur: Optional[float] = None):
+               noise: Optional[float] = None):
         self.conn.execute(
-            """INSERT INTO files(path,size,mtime,sha256,phash,width,height,kind,blur)
+            """INSERT INTO files(path,size,mtime,sha256,phash,width,height,kind,noise)
                    VALUES(?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(path) DO UPDATE SET
                      size=excluded.size,
@@ -53,9 +55,9 @@ class HashCache:
                      width=excluded.width,
                      height=excluded.height,
                      kind=excluded.kind,
-                     blur=COALESCE(excluded.blur, files.blur)
+                     noise=COALESCE(excluded.noise, files.noise)
             """,
-            (path, size, mtime, sha256, phash, width, height, kind, blur)
+            (path, size, mtime, sha256, phash, width, height, kind, noise)
         )
 
     def commit(self):
