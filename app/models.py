@@ -7,11 +7,12 @@ class ResultItem:
     size: int
     width: int
     height: int
+    mtime: Optional[float] = None
     sha256: Optional[str] = None
     phash: Optional[str] = None
-    blur: Optional[float] = None
+    noise: Optional[float] = None
     similarity: Optional[int] = None
-    blur_score: Optional[int] = None
+    noise_score: Optional[int] = None
 
     @property
     def pixels(self) -> int:

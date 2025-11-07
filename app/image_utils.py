@@ -45,6 +45,18 @@ def laplacian_variance(path: str) -> float:
     except Exception:
         return 0.0
 
+def noise_metric(path: str) -> float:
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        im = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+        if im is None:
+            return 0.0
+        lap = cv2.Laplacian(im, cv2.CV_64F)
+        _, stddev = cv2.meanStdDev(lap)
+        return float(stddev[0][0])
+    except Exception:
+        return 0.0
+
 def format_bytes(n: int) -> str:
     for unit in ['B','KB','MB','GB','TB']:
         if n < 1024:

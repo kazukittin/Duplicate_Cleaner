@@ -3,7 +3,7 @@ from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QToolBar, QPushButton, QProgressBar, QMessageBox,
-    QHeaderView, QStyleFactory, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView,
+    QHeaderView, QStyleFactory, QComboBox, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView,
     QStackedWidget, QApplication, QTabWidget
 )
 from .workers import ScanWorker
@@ -19,7 +19,7 @@ BATCH_SIZE = 1000
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DupSnap — Duplicate & Blurry Finder")
+        self.setWindowTitle("DupSnap — Duplicate & Noisy Finder")
         self.resize(1280, 780)
 
         splitter = QSplitter(self)
@@ -111,24 +111,24 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_scan)
 
         tb.addSeparator()
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(0); self.slider.setMaximum(20); self.slider.setValue(5)
-        self.slider.setFixedWidth(160)
-        self.slider.valueChanged.connect(self.on_thresh_changed)
-        tb.addWidget(QLabel(" 類似しきい値(Hamming)："))
-        tb.addWidget(self.slider)
-        self.lbl_thresh = QLabel("5")
-        tb.addWidget(self.lbl_thresh)
+        tb.addWidget(QLabel(" 類似検出："))
+        self.sim_combo = QComboBox()
+        self.sim_combo.addItem("弱", "weak")
+        self.sim_combo.addItem("中", "medium")
+        self.sim_combo.addItem("強", "strong")
+        self.sim_combo.setCurrentIndex(1)
+        self.sim_combo.currentIndexChanged.connect(self.on_sim_level_changed)
+        tb.addWidget(self.sim_combo)
 
         tb.addSeparator()
-        self.blur_slider = QSlider(Qt.Horizontal)
-        self.blur_slider.setMinimum(0); self.blur_slider.setMaximum(500); self.blur_slider.setValue(80)
-        self.blur_slider.setFixedWidth(160)
-        self.blur_slider.valueChanged.connect(self.on_blur_thresh_changed)
-        tb.addWidget(QLabel(" ブレしきい値："))
-        tb.addWidget(self.blur_slider)
-        self.lbl_blur_thresh = QLabel("80")
-        tb.addWidget(self.lbl_blur_thresh)
+        tb.addWidget(QLabel(" ノイズ検出："))
+        self.noise_combo = QComboBox()
+        self.noise_combo.addItem("弱", "weak")
+        self.noise_combo.addItem("中", "medium")
+        self.noise_combo.addItem("強", "strong")
+        self.noise_combo.setCurrentIndex(1)
+        self.noise_combo.currentIndexChanged.connect(self.on_noise_level_changed)
+        tb.addWidget(self.noise_combo)
 
         self.btn_delete = QPushButton("選択を削除")
         self.btn_delete.clicked.connect(self.delete_checked)
@@ -149,11 +149,16 @@ class MainWindow(QMainWindow):
         self._all_groups = []
         self._page = 0
 
-    def on_thresh_changed(self, v: int):
-        self.lbl_thresh.setText(str(v))
+    def on_noise_level_changed(self, index: int):
+        level_text = self.noise_combo.itemText(index) if index >= 0 else self.noise_combo.currentText()
+        self.statusBar().showMessage(f"ノイズ検出感度：{level_text}", 2000)
 
-    def on_blur_thresh_changed(self, v: int):
-        self.lbl_blur_thresh.setText(str(v))
+    def on_sim_level_changed(self, index: int):
+        level_text = self.sim_combo.itemText(index) if index >= 0 else self.sim_combo.currentText()
+        level_key = self.sim_combo.itemData(index) if index >= 0 else self.sim_combo.currentData()
+        thresh = ScanWorker.SIMILARITY_LEVELS.get(level_key, ScanWorker.SIMILARITY_LEVELS.get("medium"))
+        detail = f" (ハミング≦{thresh})" if thresh is not None else ""
+        self.statusBar().showMessage(f"類似判定感度：{level_text}{detail}", 2000)
 
     def pick_folder(self):
         d = QFileDialog.getExistingDirectory(self, "対象フォルダを選択")
@@ -181,10 +186,10 @@ class MainWindow(QMainWindow):
         os.makedirs(db_dir, exist_ok=True)
         db_path = os.path.join(db_dir, "cache.db")
 
-        sim_thresh = self.slider.value()
+        sim_level = self.sim_combo.currentData()
         # ★ db_path を渡す
-        blur_thresh = self.blur_slider.value()
-        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, blur_thresh=blur_thresh, db_path=db_path)
+        noise_level = self.noise_combo.currentData()
+        self.worker = ScanWorker(self.folder, sim_level=sim_level, noise_level=noise_level, db_path=db_path)
         self.worker.sig_progress.connect(self.progress.setValue)
         self.worker.sig_stage.connect(self.update_stage)
         self.worker.sig_finished.connect(self.on_scan_finished)
@@ -210,7 +215,7 @@ class MainWindow(QMainWindow):
 
         categorized = {"similar": [], "blur": [], "video": []}
         for g in self._all_groups:
-            if g.kind == "ブレ":
+            if g.kind == "ノイズ":
                 categorized["blur"].append(g)
             elif any(is_video_path(it.path) for it in g.items):
                 categorized["video"].append(g)
@@ -250,15 +255,15 @@ class MainWindow(QMainWindow):
             root = QTreeWidgetItem(["", kind_label, score_text, "-", g.title, "", "", ""])
             tree.addTopLevelItem(root)
             root.setFirstColumnSpanned(True)
-            if g.kind == "ブレ":
+            if g.kind == "ノイズ":
                 keep = None
             else:
                 keep = max(g.items, key=lambda it: (it.width*it.height, it.size)) if g.items else None
             for item in g.items:
                 sim_text = str(int(round(item.similarity))) if item.similarity is not None else "-"
-                blur_text = str(int(round(item.blur_score))) if getattr(item, "blur_score", None) is not None else "-"
+                noise_text = str(int(round(item.noise_score))) if getattr(item, "noise_score", None) is not None else "-"
                 child = QTreeWidgetItem(["", "ファイル", sim_text,
-                                          blur_text,
+                                          noise_text,
                                           os.path.basename(item.path), f"{item.width}x{item.height}",
                                           format_bytes(item.size), item.path])
                 child.setCheckState(0, Qt.Unchecked if item is keep else Qt.Checked)
@@ -324,7 +329,7 @@ class MainWindow(QMainWindow):
         pix = self.thumb.get_pixmap(path, max_w=300, max_h=220)
         if pix: lbl.setPixmap(pix)
         else: lbl.setText("No preview")
-        meta = QLabel(f"{row_item.text(4)}\n{row_item.text(5)}  {row_item.text(6)}\nブレ指標: {row_item.text(3)}")
+        meta = QLabel(f"{row_item.text(4)}\n{row_item.text(5)}  {row_item.text(6)}\nノイズ指標: {row_item.text(3)}")
         meta.setStyleSheet("color:#bbb;")
         lay.addWidget(lbl); lay.addWidget(meta)
         w.setStyleSheet("background:#161616;border:1px solid #2a2a2a;border-radius:10px;")
@@ -401,7 +406,7 @@ class MainWindow(QMainWindow):
     def _create_tree(self) -> QTreeWidget:
         tree = QTreeWidget()
         tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        tree.setHeaderLabels(["選択", "種類", "スコア", "ブレ指標", "ファイル名", "解像度", "サイズ", "パス"])
+        tree.setHeaderLabels(["選択", "種類", "スコア", "ノイズ指標", "ファイル名", "解像度", "サイズ", "パス"])
         tree.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         tree.header().setStretchLastSection(True)
         return tree

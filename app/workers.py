@@ -2,8 +2,14 @@
 from PySide6.QtCore import QThread, Signal
 import os
 import time
-import statistics
-from .image_utils import is_image_path, get_image_meta, sha256_file as img_sha256, phash_hex, laplacian_variance
+import math
+from .image_utils import (
+    is_image_path,
+    get_image_meta,
+    sha256_file as img_sha256,
+    phash_hex,
+    noise_metric,
+)
 from .video_utils import is_video_path, video_meta, sha256_file as vid_sha256, video_phash_hex
 from .models import ResultGroup, ResultItem
 from .cache_db import HashCache
@@ -16,13 +22,16 @@ def similarity_score_from_distance(dist: int | None) -> int | None:
     return int(max(1, min(100, round(score))))
 
 
-def blur_score_from_value(blur_value: float | None, threshold: float | None) -> int | None:
-    if blur_value is None or not threshold or threshold <= 0:
+def noise_score_from_value(noise_value: float | None, threshold: float | None) -> int | None:
+    if noise_value is None or not threshold or threshold <= 0:
         return None
-    severity = (threshold - blur_value) / threshold
-    if severity <= 0:
+    severity = (noise_value - threshold) / threshold
+    if severity < 0:
         return None
-    score = severity * 100.0
+    if severity == 0:
+        score = 1.0
+    else:
+        score = severity * 100.0
     return int(max(1, min(100, round(score))))
 
 class ScanWorker(QThread):
@@ -31,11 +40,38 @@ class ScanWorker(QThread):
     sig_error = Signal(str)
     sig_stage = Signal(str)
 
-    def __init__(self, folder: str, sim_thresh: int = 5, blur_thresh: int = 80, db_path: str = None):
+    SIMILARITY_LEVELS = {
+        "weak": 3,
+        "medium": 5,
+        "strong": 8,
+    }
+    NOISE_LEVELS = {
+        "weak": 0.1,
+        "medium": 0.3,
+        "strong": 0.6,
+    }
+
+    def __init__(
+        self,
+        folder: str,
+        sim_level: str = "medium",
+        noise_level: str = "medium",
+        db_path: str = None,
+        sim_thresh: int | None = None,
+    ):
         super().__init__()
         self.folder = folder
-        self.sim_thresh = sim_thresh
-        self.blur_thresh = blur_thresh
+        if sim_thresh is not None:
+            try:
+                self.sim_threshold = max(0, min(64, int(sim_thresh)))
+            except (TypeError, ValueError):
+                self.sim_threshold = self.SIMILARITY_LEVELS.get("medium", 5)
+            self.sim_level = None
+        else:
+            level = sim_level if sim_level in self.SIMILARITY_LEVELS else "medium"
+            self.sim_level = level
+            self.sim_threshold = self.SIMILARITY_LEVELS.get(level, 5)
+        self.noise_level = noise_level if noise_level in self.NOISE_LEVELS else "medium"
         self.db_path = db_path or os.path.join(os.getcwd(), "dupsnap_cache.db")
 
     def run(self):
@@ -91,7 +127,7 @@ class ScanWorker(QThread):
                 kind = "img" if is_image_path(p) else ("vid" if is_video_path(p) else "other")
                 row = cache.get(p, size, mtime)
                 if row:
-                    sha256, ph, w, h, kind_cached, blur_cached = row
+                    sha256, ph, w, h, kind_cached, noise_cached = row
                     kind = kind_cached or kind
                     if w is None or h is None:
                         if kind == "img":
@@ -99,8 +135,8 @@ class ScanWorker(QThread):
                         else:
                             meta = video_meta(p) or {"w":0,"h":0,"size":size}
                         w, h = meta.get("w",0), meta.get("h",0)
-                        cache.upsert(p, size, mtime, sha256 or "", ph or "", w, h, kind, blur_cached)
-                    blur_val = blur_cached
+                        cache.upsert(p, size, mtime, sha256 or "", ph or "", w, h, kind, noise_cached)
+                    noise_val = noise_cached
                 else:
                     if kind == "img":
                         meta = get_image_meta(p)
@@ -115,9 +151,9 @@ class ScanWorker(QThread):
                         sha256 = vid_sha256(p)
                         ph = ""
                     cache.upsert(p, size, mtime, sha256, ph, w, h, kind, None)
-                    blur_val = None
+                    noise_val = None
 
-                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0, blur=blur_val)
+                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0, mtime=mtime, noise=noise_val)
                 it.sha256 = sha256 or ""
                 items.append(it)
                 dup_groups_map.setdefault(it.sha256, []).append(it)
@@ -142,27 +178,57 @@ class ScanWorker(QThread):
             total2 = max(1, unique_total)
             for i, it in enumerate(unique_items, start=1):
                 emit_stage(f"類似判定準備中 ({i}/{unique_total})" if unique_total else "類似判定準備中 (0/0)")
+                size_key = it.size
+                mtime_key = it.mtime
                 try:
                     st = os.stat(it.path)
-                    row = cache.get(it.path, st.st_size, st.st_mtime)
+                    size_key = st.st_size
+                    mtime_key = st.st_mtime
                 except Exception:
-                    row = None
+                    st = None
+
+                row = None
+                if size_key is not None and mtime_key is not None:
+                    try:
+                        row = cache.get(it.path, size_key, mtime_key)
+                    except Exception:
+                        row = None
+
                 ph = None
-                blur_cached = None
+                noise_cached = None
+                kind_cached = None
                 if row:
-                    blur_cached = row[5]
-                if row and row[1]:
-                    ph = row[1]
-                else:
-                    if is_image_path(it.path):
+                    noise_cached = row[5]
+                    kind_cached = row[4]
+                    if row[1]:
+                        ph = row[1]
+
+                if not ph:
+                    is_img = is_image_path(it.path)
+                    kind_for_cache = kind_cached or ("img" if is_img else "vid")
+                    if is_img:
                         ph = phash_hex(it.path)
                     else:
                         ph = video_phash_hex(it.path, samples=12)
-                    cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256, ph or "", it.width, it.height,
-                                 "img" if is_image_path(it.path) else "vid", it.blur)
+                    if size_key is not None and mtime_key is not None:
+                        cache.upsert(
+                            it.path,
+                            size_key,
+                            mtime_key,
+                            it.sha256 or "",
+                            ph or "",
+                            it.width,
+                            it.height,
+                            kind_for_cache,
+                            it.noise,
+                        )
                 it.phash = ph or ""
-                if it.blur is None and blur_cached is not None:
-                    it.blur = blur_cached
+                if it.noise is None and noise_cached is not None:
+                    it.noise = noise_cached
+                if size_key is not None:
+                    it.size = size_key
+                if mtime_key is not None:
+                    it.mtime = mtime_key
                 if i % 50 == 0:
                     cache.commit()
                     self.sig_progress.emit(20 + int(i/total2*35))
@@ -194,7 +260,7 @@ class ScanWorker(QThread):
                         if not b.phash:
                             continue
                         dist = hamming(a.phash, b.phash)
-                        if dist <= self.sim_thresh:
+                        if dist <= self.sim_threshold:
                             members.append(b)
                             visited.add(j)
                     if len(members) >= 2:
@@ -221,71 +287,63 @@ class ScanWorker(QThread):
                     self.sig_progress.emit(55 + int(processed/total_b*35))
 
             img_items = [it for it in items if is_image_path(it.path)]
-            blur_total = len(img_items)
-            if not blur_total:
-                emit_stage("ブレ判定 (0/0)", force=True)
-            total_blur = max(1, blur_total)
+            noise_total = len(img_items)
+            if not noise_total:
+                emit_stage("ノイズ判定 (0/0)", force=True)
+            total_noise = max(1, noise_total)
             last_progress = 90
-            blur_values: list[float] = []
+            noise_values: list[float] = []
             for idx, it in enumerate(img_items, start=1):
-                emit_stage(f"ブレ判定 ({idx}/{blur_total})" if blur_total else "ブレ判定 (0/0)")
-                if it.blur is None:
-                    it.blur = laplacian_variance(it.path)
+                emit_stage(f"ノイズ判定 ({idx}/{noise_total})" if noise_total else "ノイズ判定 (0/0)")
+                if it.noise is None:
+                    it.noise = noise_metric(it.path)
                     try:
                         st = os.stat(it.path)
                         cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256 or "", it.phash or "",
-                                     it.width, it.height, "img", it.blur)
+                                     it.width, it.height, "img", it.noise)
                     except Exception:
                         pass
-                if it.blur is not None:
-                    blur_values.append(it.blur)
-                progress = 90 + int(idx / total_blur * 5)
+                if it.noise is not None:
+                    noise_values.append(it.noise)
+                progress = 90 + int(idx / total_noise * 5)
                 if progress > last_progress:
                     self.sig_progress.emit(progress)
                     last_progress = progress
             for it in items:
                 if not is_image_path(it.path):
-                    it.blur = None
+                    it.noise = None
 
-            blur_candidates: list[ResultItem] = []
-            dynamic_blur_threshold: float | None = None
-            if blur_values:
-                sorted_vals = sorted(v for v in blur_values if v is not None)
-                if sorted_vals:
-                    if len(sorted_vals) >= 4:
-                        q1 = statistics.quantiles(sorted_vals, n=4)[0]
-                    else:
-                        q1 = sorted_vals[0]
-                    dynamic_blur_threshold = q1
-                    if self.blur_thresh:
-                        dynamic_blur_threshold = min(dynamic_blur_threshold, float(self.blur_thresh))
+            noise_candidates: list[ResultItem] = []
+            dynamic_noise_threshold: float | None = None
+            if noise_values:
+                positive_vals = sorted(v for v in noise_values if v is not None and v > 0)
+                if positive_vals:
+                    frac = self.NOISE_LEVELS.get(self.noise_level, 0.3)
+                    count = len(positive_vals)
+                    take = max(1, math.ceil(count * frac))
+                    idx = max(0, count - take)
+                    dynamic_noise_threshold = positive_vals[idx]
 
-            candidate_threshold: float | None = dynamic_blur_threshold
-            if candidate_threshold is None and self.blur_thresh:
-                candidate_threshold = float(self.blur_thresh)
+            candidate_threshold: float | None = dynamic_noise_threshold
 
             if candidate_threshold and candidate_threshold > 0:
                 for it in img_items:
-                    if it.blur is None or it.blur > candidate_threshold:
+                    if it.noise is None or it.noise < candidate_threshold:
                         continue
-                    severity = (candidate_threshold - it.blur) / candidate_threshold
-                    if severity <= 0.05:
-                        continue
-                    score = blur_score_from_value(it.blur, candidate_threshold)
+                    score = noise_score_from_value(it.noise, candidate_threshold)
                     if score is None:
                         continue
-                    it.blur_score = score
-                    blur_candidates.append(it)
+                    it.noise_score = score
+                    noise_candidates.append(it)
 
-            if blur_candidates:
-                blur_candidates.sort(key=lambda it: it.blur_score if it.blur_score is not None else 0, reverse=True)
-                max_score = max((it.blur_score for it in blur_candidates if it.blur_score is not None), default=None)
-                threshold_for_title = candidate_threshold or self.blur_thresh
-                if threshold_for_title:
-                    title = f"ブレ疑い (≲ {int(round(threshold_for_title))})"
+            if noise_candidates:
+                noise_candidates.sort(key=lambda it: it.noise_score if it.noise_score is not None else 0, reverse=True)
+                max_score = max((it.noise_score for it in noise_candidates if it.noise_score is not None), default=None)
+                if candidate_threshold:
+                    title = f"ノイズ疑い (≳ {int(round(candidate_threshold))})"
                 else:
-                    title = "ブレ疑い"
-                groups.append(ResultGroup(kind="ブレ", title=title, items=blur_candidates, score=max_score))
+                    title = "ノイズ疑い"
+                groups.append(ResultGroup(kind="ノイズ", title=title, items=noise_candidates, score=max_score))
 
             cache.commit()
             self.sig_progress.emit(100)
