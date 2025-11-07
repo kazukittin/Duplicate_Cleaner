@@ -3,7 +3,7 @@ from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QToolBar, QPushButton, QProgressBar, QMessageBox,
-    QHeaderView, QStyleFactory, QComboBox, QSlider, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView,
+    QHeaderView, QStyleFactory, QComboBox, QHBoxLayout, QScrollArea, QFrame, QAbstractItemView,
     QStackedWidget, QApplication, QTabWidget
 )
 from .workers import ScanWorker
@@ -111,14 +111,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_scan)
 
         tb.addSeparator()
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(0); self.slider.setMaximum(20); self.slider.setValue(5)
-        self.slider.setFixedWidth(160)
-        self.slider.valueChanged.connect(self.on_thresh_changed)
-        tb.addWidget(QLabel(" 類似しきい値(Hamming)："))
-        tb.addWidget(self.slider)
-        self.lbl_thresh = QLabel("5")
-        tb.addWidget(self.lbl_thresh)
+        tb.addWidget(QLabel(" 類似検出："))
+        self.sim_combo = QComboBox()
+        self.sim_combo.addItem("弱", "weak")
+        self.sim_combo.addItem("中", "medium")
+        self.sim_combo.addItem("強", "strong")
+        self.sim_combo.setCurrentIndex(1)
+        self.sim_combo.currentIndexChanged.connect(self.on_sim_level_changed)
+        tb.addWidget(self.sim_combo)
 
         tb.addSeparator()
         tb.addWidget(QLabel(" ノイズ検出："))
@@ -149,12 +149,16 @@ class MainWindow(QMainWindow):
         self._all_groups = []
         self._page = 0
 
-    def on_thresh_changed(self, v: int):
-        self.lbl_thresh.setText(str(v))
-
     def on_noise_level_changed(self, index: int):
         level_text = self.noise_combo.itemText(index) if index >= 0 else self.noise_combo.currentText()
         self.statusBar().showMessage(f"ノイズ検出感度：{level_text}", 2000)
+
+    def on_sim_level_changed(self, index: int):
+        level_text = self.sim_combo.itemText(index) if index >= 0 else self.sim_combo.currentText()
+        level_key = self.sim_combo.itemData(index) if index >= 0 else self.sim_combo.currentData()
+        thresh = ScanWorker.SIMILARITY_LEVELS.get(level_key, ScanWorker.SIMILARITY_LEVELS.get("medium"))
+        detail = f" (ハミング≦{thresh})" if thresh is not None else ""
+        self.statusBar().showMessage(f"類似判定感度：{level_text}{detail}", 2000)
 
     def pick_folder(self):
         d = QFileDialog.getExistingDirectory(self, "対象フォルダを選択")
@@ -182,10 +186,10 @@ class MainWindow(QMainWindow):
         os.makedirs(db_dir, exist_ok=True)
         db_path = os.path.join(db_dir, "cache.db")
 
-        sim_thresh = self.slider.value()
+        sim_level = self.sim_combo.currentData()
         # ★ db_path を渡す
         noise_level = self.noise_combo.currentData()
-        self.worker = ScanWorker(self.folder, sim_thresh=sim_thresh, noise_level=noise_level, db_path=db_path)
+        self.worker = ScanWorker(self.folder, sim_level=sim_level, noise_level=noise_level, db_path=db_path)
         self.worker.sig_progress.connect(self.progress.setValue)
         self.worker.sig_stage.connect(self.update_stage)
         self.worker.sig_finished.connect(self.on_scan_finished)

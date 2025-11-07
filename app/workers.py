@@ -40,16 +40,37 @@ class ScanWorker(QThread):
     sig_error = Signal(str)
     sig_stage = Signal(str)
 
+    SIMILARITY_LEVELS = {
+        "weak": 3,
+        "medium": 5,
+        "strong": 8,
+    }
     NOISE_LEVELS = {
         "weak": 0.1,
         "medium": 0.3,
         "strong": 0.6,
     }
 
-    def __init__(self, folder: str, sim_thresh: int = 5, noise_level: str = "medium", db_path: str = None):
+    def __init__(
+        self,
+        folder: str,
+        sim_level: str = "medium",
+        noise_level: str = "medium",
+        db_path: str = None,
+        sim_thresh: int | None = None,
+    ):
         super().__init__()
         self.folder = folder
-        self.sim_thresh = sim_thresh
+        if sim_thresh is not None:
+            try:
+                self.sim_threshold = max(0, min(64, int(sim_thresh)))
+            except (TypeError, ValueError):
+                self.sim_threshold = self.SIMILARITY_LEVELS.get("medium", 5)
+            self.sim_level = None
+        else:
+            level = sim_level if sim_level in self.SIMILARITY_LEVELS else "medium"
+            self.sim_level = level
+            self.sim_threshold = self.SIMILARITY_LEVELS.get(level, 5)
         self.noise_level = noise_level if noise_level in self.NOISE_LEVELS else "medium"
         self.db_path = db_path or os.path.join(os.getcwd(), "dupsnap_cache.db")
 
@@ -239,7 +260,7 @@ class ScanWorker(QThread):
                         if not b.phash:
                             continue
                         dist = hamming(a.phash, b.phash)
-                        if dist <= self.sim_thresh:
+                        if dist <= self.sim_threshold:
                             members.append(b)
                             visited.add(j)
                     if len(members) >= 2:
