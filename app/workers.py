@@ -132,7 +132,7 @@ class ScanWorker(QThread):
                     cache.upsert(p, size, mtime, sha256, ph, w, h, kind, None)
                     noise_val = None
 
-                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0, noise=noise_val)
+                it = ResultItem(path=p, size=size, width=w or 0, height=h or 0, mtime=mtime, noise=noise_val)
                 it.sha256 = sha256 or ""
                 items.append(it)
                 dup_groups_map.setdefault(it.sha256, []).append(it)
@@ -157,27 +157,57 @@ class ScanWorker(QThread):
             total2 = max(1, unique_total)
             for i, it in enumerate(unique_items, start=1):
                 emit_stage(f"類似判定準備中 ({i}/{unique_total})" if unique_total else "類似判定準備中 (0/0)")
+                size_key = it.size
+                mtime_key = it.mtime
                 try:
                     st = os.stat(it.path)
-                    row = cache.get(it.path, st.st_size, st.st_mtime)
+                    size_key = st.st_size
+                    mtime_key = st.st_mtime
                 except Exception:
-                    row = None
+                    st = None
+
+                row = None
+                if size_key is not None and mtime_key is not None:
+                    try:
+                        row = cache.get(it.path, size_key, mtime_key)
+                    except Exception:
+                        row = None
+
                 ph = None
                 noise_cached = None
+                kind_cached = None
                 if row:
                     noise_cached = row[5]
-                if row and row[1]:
-                    ph = row[1]
-                else:
-                    if is_image_path(it.path):
+                    kind_cached = row[4]
+                    if row[1]:
+                        ph = row[1]
+
+                if not ph:
+                    is_img = is_image_path(it.path)
+                    kind_for_cache = kind_cached or ("img" if is_img else "vid")
+                    if is_img:
                         ph = phash_hex(it.path)
                     else:
                         ph = video_phash_hex(it.path, samples=12)
-                    cache.upsert(it.path, st.st_size, st.st_mtime, it.sha256, ph or "", it.width, it.height,
-                                 "img" if is_image_path(it.path) else "vid", it.noise)
+                    if size_key is not None and mtime_key is not None:
+                        cache.upsert(
+                            it.path,
+                            size_key,
+                            mtime_key,
+                            it.sha256 or "",
+                            ph or "",
+                            it.width,
+                            it.height,
+                            kind_for_cache,
+                            it.noise,
+                        )
                 it.phash = ph or ""
                 if it.noise is None and noise_cached is not None:
                     it.noise = noise_cached
+                if size_key is not None:
+                    it.size = size_key
+                if mtime_key is not None:
+                    it.mtime = mtime_key
                 if i % 50 == 0:
                     cache.commit()
                     self.sig_progress.emit(20 + int(i/total2*35))

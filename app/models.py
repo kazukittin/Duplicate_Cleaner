@@ -7,6 +7,7 @@ class ResultItem:
     size: int
     width: int
     height: int
+    mtime: Optional[float] = None
     sha256: Optional[str] = None
     phash: Optional[str] = None
     noise: Optional[float] = None
