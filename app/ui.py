@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QFileDialog, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QLabel, QPushButton, QProgressBar, QMessageBox,
@@ -398,7 +398,7 @@ class MainWindow(QMainWindow):
     # ---- UI building helpers ----
     def _build_palette(self):
         palette = self.palette()
-        palette.setColor(palette.Window, Qt.black)
+        palette.setColor(QPalette.ColorRole.Window, Qt.black)
         self.setPalette(palette)
         self.setStyleSheet(
             f"""
