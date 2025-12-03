@@ -1,17 +1,4 @@
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QPushButton, QLabel, QFileDialog, 
-                               QProgressBar, QSplitter, QMessageBox)
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction
-
-# Import core modules
-from core.scanner import Scanner
-from core.blur_detector import BlurDetector
-from core.hash_engine import HashEngine
-from core.group_builder import GroupBuilder
-from core.rule_engine import RuleEngine
-from core.executor import Executor
-
+import os
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                                QProgressBar, QSplitter, QMessageBox)
@@ -322,7 +309,13 @@ class MainWindow(QMainWindow):
             idx = group.index(current_path)
             new_idx = idx + delta
             if 0 <= new_idx < len(group):
-                self.thumbnail_grid.select_path(group[new_idx])
+                new_path = group[new_idx]
+                # Update thumbnail selection
+                self.thumbnail_grid.select_path(new_path)
+                # Scroll to make it visible
+                if new_path in self.thumbnail_grid.widgets:
+                    widget = self.thumbnail_grid.widgets[new_path]
+                    self.thumbnail_grid.scroll.ensureWidgetVisible(widget)
         except ValueError:
             pass
 
@@ -337,7 +330,14 @@ class ScanWorker(QThread):
         self.folder = folder
         
     def run(self):
-        self.status.emit("Scanning files...")
+        from core.cache import Cache
+        from core.video_hash import VideoHash
+        
+        # Load cache
+        cache = Cache()
+        cache.load(self.folder)
+        
+        self.status.emit("ファイルをスキャン中...")
         files = Scanner.scan_directory(self.folder)
         total = len(files)
         
@@ -345,19 +345,50 @@ class ScanWorker(QThread):
         hashes = []
         
         for i, f in enumerate(files):
-            # Blur Check
-            score = BlurDetector.calculate_blur_score(f)
-            if BlurDetector.is_blurry(score):
+            # Get file modification time
+            try:
+                mtime = os.path.getmtime(f)
+            except:
+                mtime = 0
+                
+            # Check cache
+            cached = cache.get(f, mtime)
+            
+            # Determine if file is video
+            ext = os.path.splitext(f)[1].lower()
+            is_video = ext in {'.mp4', '.avi', '.mov', '.mkv'}
+            
+            if cached:
+                # Use cached values
+                h = cached.get('hash')
+                score = cached.get('blur_score', 0)
+            else:
+                # Compute new values
+                if is_video:
+                    h = VideoHash.compute_hash(f)
+                    score = 0  # Videos don't have blur scores
+                else:
+                    # Blur Check (images only)
+                    score = BlurDetector.calculate_blur_score(f)
+                    # Hash
+                    h = HashEngine.compute_hash(f)
+                
+                # Cache the results
+                cache.set(f, mtime, h, score)
+            
+            # Add to results
+            if not is_video and BlurDetector.is_blurry(score):
                 blurry_images.append((f, score))
                 
-            # Hash
-            h = HashEngine.compute_hash(f)
             hashes.append((f, h))
             
             if i % 10 == 0:
-                self.progress.emit(int((i / total) * 50)) # First 50%
+                self.progress.emit(int((i / total) * 50))
                 
-        self.status.emit("Grouping images...")
+        # Save cache
+        cache.save(self.folder)
+        
+        self.status.emit("画像をグループ化中...")
         groups = GroupBuilder.build_groups(hashes, threshold=5)
         
         self.progress.emit(100)

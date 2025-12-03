@@ -3,7 +3,7 @@ from typing import List, Generator, Callable, Dict, Any
 from PIL import Image, ExifTags
 
 class Scanner:
-    SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.webp'}
+    SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.webp', '.mp4', '.avi', '.mov', '.mkv'}
 
     @staticmethod
     def get_exif_data(image_path: str) -> Dict[str, Any]:
