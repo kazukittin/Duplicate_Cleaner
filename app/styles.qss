@@ -1,9 +1,0 @@
-QMainWindow { background: #0f0f0f; }
-QTreeWidget { background: #171717; color: #ddd; alternate-background-color:#1f1f1f; }
-QHeaderView::section { background:#202020; color:#bbb; padding:6px; border:0; border-bottom:1px solid #333; }
-QLabel { color:#ddd; }
-QToolBar { background:#151515; border:0; }
-QPushButton { background:#2a2a2a; color:#eee; padding:6px 12px; border-radius:8px; }
-QPushButton:hover { background:#3a3a3a; }
-QProgressBar { background:#222; color:#eee; border:1px solid #333; }
-QProgressBar::chunk { background:#5a9; }
