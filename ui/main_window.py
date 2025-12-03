@@ -358,7 +358,7 @@ class ScanWorker(QThread):
                 self.progress.emit(int((i / total) * 50)) # First 50%
                 
         self.status.emit("Grouping images...")
-        groups = GroupBuilder.build_groups(hashes, threshold=10)
+        groups = GroupBuilder.build_groups(hashes, threshold=5)
         
         self.progress.emit(100)
         

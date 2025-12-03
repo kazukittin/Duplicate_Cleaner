@@ -27,5 +27,5 @@ class BlurDetector:
             return 0.0
 
     @staticmethod
-    def is_blurry(score: float, threshold: float = 100.0) -> bool:
+    def is_blurry(score: float, threshold: float = 50.0) -> bool:
         return score < threshold

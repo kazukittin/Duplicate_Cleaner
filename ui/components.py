@@ -63,7 +63,7 @@ class ThumbnailWidget(QFrame):
         
         # Blur Icon/Text
         if blur_score is not None:
-            blur_label = QLabel("⚠️" if blur_score < 100 else "✅")
+            blur_label = QLabel("⚠️" if blur_score < 50 else "✅")
             blur_label.setToolTip(f"スコア: {blur_score:.1f}")
             info_layout.addWidget(blur_label)
             
