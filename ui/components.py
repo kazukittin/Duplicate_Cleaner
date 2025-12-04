@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QListWidget, QListWidgetItem, 
                                QLabel, QScrollArea, QGridLayout, QCheckBox, QFrame,
-                               QHBoxLayout, QPushButton, QSizePolicy, QSplitter)
+                               QHBoxLayout, QPushButton, QSizePolicy, QSplitter, QMenu)
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QIcon, QAction
@@ -8,6 +8,7 @@ import os
 
 class GroupListWidget(QWidget):
     group_selected = Signal(int) # Emits group index
+    batch_operation = Signal(int, str)  # Emits group index and operation type
 
     def __init__(self):
         super().__init__()
@@ -16,6 +17,8 @@ class GroupListWidget(QWidget):
         
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self.group_selected.emit)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self.show_context_menu)
         self.layout.addWidget(self.list_widget)
 
     def set_groups(self, groups, group_types=None):
@@ -28,14 +31,43 @@ class GroupListWidget(QWidget):
                 
             item = QListWidgetItem(f"グループ #{i+1} ({len(group)}枚)\n[{g_type}]")
             self.list_widget.addItem(item)
+    
+    def show_context_menu(self, position):
+        """Show context menu for batch operations"""
+        current_row = self.list_widget.currentRow()
+        if current_row < 0:
+            return
+        
+        menu = QMenu(self)
+        
+        mark_all_delete = QAction("すべて削除候補にする", self)
+        mark_all_delete.triggered.connect(lambda: self.batch_operation.emit(current_row, "mark_all_delete"))
+        menu.addAction(mark_all_delete)
+        
+        mark_all_keep = QAction("すべて保持にする", self)
+        mark_all_keep.triggered.connect(lambda: self.batch_operation.emit(current_row, "mark_all_keep"))
+        menu.addAction(mark_all_keep)
+        
+        menu.addSeparator()
+        
+        delete_except_highest_res = QAction("最高解像度以外を削除候補", self)
+        delete_except_highest_res.triggered.connect(lambda: self.batch_operation.emit(current_row, "delete_except_highest_res"))
+        menu.addAction(delete_except_highest_res)
+        
+        delete_except_newest = QAction("最新以外を削除候補", self)
+        delete_except_newest.triggered.connect(lambda: self.batch_operation.emit(current_row, "delete_except_newest"))
+        menu.addAction(delete_except_newest)
+        
+        menu.exec(self.list_widget.mapToGlobal(position))
 
 class ThumbnailWidget(QFrame):
     clicked = Signal(str) # Emits path
     toggled = Signal(str, bool) # Emits path, is_checked
 
-    def __init__(self, path, is_checked=False, blur_score=None):
+    def __init__(self, path, is_checked=False, blur_score=None, size=120):
         super().__init__()
         self.path = path
+        self.thumbnail_size = size
         self.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
         self.setLineWidth(2)
         
@@ -45,7 +77,7 @@ class ThumbnailWidget(QFrame):
         # Image
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setFixedSize(120, 120)
+        self.image_label.setFixedSize(size, size)
         self.image_label.setStyleSheet("background-color: #eee;")
         self.layout.addWidget(self.image_label)
         
@@ -74,7 +106,13 @@ class ThumbnailWidget(QFrame):
     def load_thumbnail(self):
         pixmap = QPixmap(self.path)
         if not pixmap.isNull():
-            self.image_label.setPixmap(pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.image_label.setPixmap(pixmap.scaled(self.thumbnail_size, self.thumbnail_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    
+    def set_thumbnail_size(self, size):
+        """Update thumbnail size"""
+        self.thumbnail_size = size
+        self.image_label.setFixedSize(size, size)
+        self.load_thumbnail()
 
     def mousePressEvent(self, event):
         self.clicked.emit(self.path)
@@ -99,11 +137,26 @@ class ThumbnailWidget(QFrame):
 class ThumbnailGridWidget(QWidget):
     selection_changed = Signal(list) # Emits list of selected paths
     delete_toggled = Signal(str, bool)
+    batch_select_all = Signal()  # Signal for select all
+    batch_deselect_all = Signal()  # Signal for deselect all
 
     def __init__(self):
         super().__init__()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Toolbar for batch operations
+        self.toolbar = QHBoxLayout()
+        self.select_all_btn = QPushButton("全選択 (削除候補)")
+        self.select_all_btn.clicked.connect(self.batch_select_all.emit)
+        self.deselect_all_btn = QPushButton("全解除 (保持)")
+        self.deselect_all_btn.clicked.connect(self.batch_deselect_all.emit)
+        
+        self.toolbar.addWidget(self.select_all_btn)
+        self.toolbar.addWidget(self.deselect_all_btn)
+        self.toolbar.addStretch()
+        
+        self.layout.addLayout(self.toolbar)
         
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -115,8 +168,17 @@ class ThumbnailGridWidget(QWidget):
         self.layout.addWidget(self.scroll)
         self.widgets = {}
         self.selected_paths = [] # List of selected paths (max 2)
+        self.thumbnail_size = 120  # Default size
+        self.current_images = []
+        self.current_actions = {}
+        self.current_blur_scores = {}
 
     def set_images(self, images, actions, blur_scores=None):
+        # Store current data for resizing
+        self.current_images = images
+        self.current_actions = actions
+        self.current_blur_scores = blur_scores if blur_scores else {}
+        
         # Clear existing
         for i in reversed(range(self.grid.count())): 
             self.grid.itemAt(i).widget().setParent(None)
@@ -131,7 +193,7 @@ class ThumbnailGridWidget(QWidget):
             is_checked = actions.get(path) == 'delete'
             score = blur_scores.get(path) if blur_scores else None
             
-            w = ThumbnailWidget(path, is_checked, score)
+            w = ThumbnailWidget(path, is_checked, score, self.thumbnail_size)
             w.clicked.connect(self.handle_click)
             w.toggled.connect(self.delete_toggled.emit)
             w.toggled.connect(w.update_style)
@@ -143,6 +205,12 @@ class ThumbnailGridWidget(QWidget):
             if col >= max_cols:
                 col = 0
                 row += 1
+    
+    def set_thumbnail_size(self, size):
+        """Update thumbnail size for all thumbnails"""
+        self.thumbnail_size = size
+        # Refresh the grid with new size
+        self.set_images(self.current_images, self.current_actions, self.current_blur_scores)
                 
     def handle_click(self, path):
         modifiers = QApplication.keyboardModifiers()
@@ -253,25 +321,94 @@ class DetailWidget(QWidget):
             self.delete_btn.setStyleSheet("")
 
 class SinglePreview(QWidget):
+    zoom_changed = Signal(float)  # Emit zoom level when changed
+    
     def __init__(self):
         super().__init__()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
+        # Zoom controls
+        self.zoom_toolbar = QHBoxLayout()
+        self.zoom_label = QLabel("ズーム: 100%")
+        self.zoom_reset_btn = QPushButton("リセット")
+        self.zoom_reset_btn.clicked.connect(self.reset_zoom)
+        self.zoom_toolbar.addWidget(self.zoom_label)
+        self.zoom_toolbar.addWidget(self.zoom_reset_btn)
+        self.zoom_toolbar.addStretch()
+        self.layout.addLayout(self.zoom_toolbar)
+        
         self.scroll = QScrollArea()
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.scroll.setWidget(self.image_label)
-        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidgetResizable(False)  # Changed to False for zoom support
         self.layout.addWidget(self.scroll)
         
+        self.current_pixmap = None
+        self.zoom_level = 1.0
+        self.current_path = None
+        
     def set_image(self, path):
+        self.current_path = path
         if not path:
             self.image_label.clear()
+            self.current_pixmap = None
             return
-        pixmap = QPixmap(path)
-        if not pixmap.isNull():
-            self.image_label.setPixmap(pixmap.scaled(self.scroll.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        
+        self.current_pixmap = QPixmap(path)
+        if not self.current_pixmap.isNull():
+            self.zoom_level = 1.0
+            self.update_image_display()
+    
+    def update_image_display(self):
+        """Update the displayed image with current zoom level"""
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.zoom_level,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+            self.image_label.resize(scaled_pixmap.size())
+            self.zoom_label.setText(f"ズーム: {int(self.zoom_level * 100)}%")
+            self.zoom_changed.emit(self.zoom_level)
+    
+    def wheelEvent(self, event):
+        """Handle mouse wheel for zooming"""
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            # Get the scroll delta
+            delta = event.angleDelta().y()
+            
+            # Calculate zoom factor
+            zoom_factor = 1.1 if delta > 0 else 0.9
+            new_zoom = self.zoom_level * zoom_factor
+            
+            # Limit zoom range
+            if 0.1 <= new_zoom <= 5.0:
+                self.zoom_level = new_zoom
+                self.update_image_display()
+            
+            event.accept()
+        else:
+            super().wheelEvent(event)
+    
+    def mouseDoubleClickEvent(self, event):
+        """Reset zoom on double click"""
+        self.reset_zoom()
+        event.accept()
+    
+    def reset_zoom(self):
+        """Reset zoom to 100%"""
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            self.zoom_level = 1.0
+            self.update_image_display()
+    
+    def set_zoom(self, zoom_level):
+        """Set zoom level (for synchronization)"""
+        if 0.1 <= zoom_level <= 5.0:
+            self.zoom_level = zoom_level
+            self.update_image_display()
 
 class PreviewWidget(QWidget):
     def __init__(self):
@@ -287,7 +424,7 @@ class PreviewWidget(QWidget):
         
         self.right_view.setVisible(False)
         
-        # Sync scrolling (Simple implementation)
+        # Sync scrolling
         self.left_view.scroll.verticalScrollBar().valueChanged.connect(
             self.right_view.scroll.verticalScrollBar().setValue)
         self.right_view.scroll.verticalScrollBar().valueChanged.connect(
@@ -297,6 +434,26 @@ class PreviewWidget(QWidget):
             self.right_view.scroll.horizontalScrollBar().setValue)
         self.right_view.scroll.horizontalScrollBar().valueChanged.connect(
             self.left_view.scroll.horizontalScrollBar().setValue)
+        
+        # Sync zoom levels
+        self.left_view.zoom_changed.connect(self.sync_zoom_from_left)
+        self.right_view.zoom_changed.connect(self.sync_zoom_from_right)
+        
+        self._syncing_zoom = False  # Prevent infinite loop
+
+    def sync_zoom_from_left(self, zoom_level):
+        """Synchronize zoom from left to right"""
+        if not self._syncing_zoom and self.right_view.isVisible():
+            self._syncing_zoom = True
+            self.right_view.set_zoom(zoom_level)
+            self._syncing_zoom = False
+    
+    def sync_zoom_from_right(self, zoom_level):
+        """Synchronize zoom from right to left"""
+        if not self._syncing_zoom and self.right_view.isVisible():
+            self._syncing_zoom = True
+            self.left_view.set_zoom(zoom_level)
+            self._syncing_zoom = False
 
     def set_images(self, path1, path2=None):
         self.left_view.set_image(path1)

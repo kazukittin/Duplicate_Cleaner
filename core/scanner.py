@@ -20,8 +20,11 @@ class Scanner:
                         if decoded == 'DateTimeOriginal':
                             exif_data['DateTimeOriginal'] = value
                             break # We only care about date for now
-        except Exception:
-            pass
+        except (OSError, IOError, AttributeError) as e:
+            # Handle corrupted images, permission errors, etc.
+            print(f"Warning: Could not read EXIF from {image_path}: {e}")
+        except Exception as e:
+            print(f"Unexpected error reading EXIF from {image_path}: {e}")
         return exif_data
 
     @staticmethod
@@ -45,12 +48,18 @@ class Scanner:
         
         for root, _, files in os.walk(root_path):
             for file in files:
-                ext = os.path.splitext(file)[1].lower()
-                if ext in Scanner.SUPPORTED_EXTENSIONS:
-                    full_path = os.path.join(root, file)
-                    image_files.append(full_path)
-                    
-                    if progress_callback:
-                        progress_callback(len(image_files))
+                try:
+                    ext = os.path.splitext(file)[1].lower()
+                    if ext in Scanner.SUPPORTED_EXTENSIONS:
+                        full_path = os.path.join(root, file)
+                        # Verify file exists and is accessible
+                        if os.path.isfile(full_path) and os.access(full_path, os.R_OK):
+                            image_files.append(full_path)
+                        
+                        if progress_callback:
+                            progress_callback(len(image_files))
+                except (OSError, PermissionError) as e:
+                    print(f"Warning: Could not access {file}: {e}")
+                    continue
                         
         return image_files

@@ -19,11 +19,15 @@ class BlurDetector:
             stream.close()
 
             if image is None:
+                print(f"Warning: Could not decode image {image_path}")
                 return 0.0
 
             return cv2.Laplacian(image, cv2.CV_64F).var()
+        except (OSError, IOError) as e:
+            print(f"Warning: Could not read file {image_path}: {e}")
+            return 0.0
         except Exception as e:
-            print(f"Error processing {image_path}: {e}")
+            print(f"Unexpected error processing {image_path}: {e}")
             return 0.0
 
     @staticmethod

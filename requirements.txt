@@ -1,5 +1,5 @@
-opencv-python
-Pillow
-imagehash
 PySide6
+opencv-python
+pillow
 numpy
+imagehash
