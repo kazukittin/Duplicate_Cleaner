@@ -15,7 +15,8 @@ from core.executor import Executor
 from core.settings import Settings
 
 # Import UI components
-from ui.components import GroupListWidget, ThumbnailGridWidget, PreviewWidget, DetailWidget
+from ui.components import GroupListWidget, PreviewWidget, DetailWidget
+from ui.lazy_thumbnail_grid import LazyThumbnailGridWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -114,8 +115,8 @@ class MainWindow(QMainWindow):
         self.group_list.batch_operation.connect(self.handle_batch_operation)
         self.bottom_splitter.addWidget(self.group_list)
         
-        # Center: Thumbnails
-        self.thumbnail_grid = ThumbnailGridWidget()
+        # Center: Thumbnails (Lazy Loading)
+        self.thumbnail_grid = LazyThumbnailGridWidget()
         self.thumbnail_grid.selection_changed.connect(self.on_selection_changed)
         self.thumbnail_grid.delete_toggled.connect(self.on_delete_toggled)
         self.thumbnail_grid.batch_select_all.connect(self.batch_select_all_current_group)
@@ -280,6 +281,10 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self.current_groups):
             self.current_group_index = index
             group = self.current_groups[index]
+            
+            # Show group size info
+            self.status_label.setText(f"グループ #{index+1}: {len(group)} 枚の画像")
+            
             self.thumbnail_grid.set_images(group, self.actions, self.blur_scores)
             
             # Select first image in group
@@ -620,13 +625,17 @@ class MainWindow(QMainWindow):
 
 class ScanWorker(QThread):
     progress = Signal(int)
-    progress_detail = Signal(str, int, int, float)  # current_file, processed, total, elapsed_time
+    progress_detail = Signal(str, int, int, float)
     status = Signal(str)
     finished = Signal(dict)
     
     def __init__(self, folder):
         super().__init__()
         self.folder = folder
+        self._should_stop = False
+        
+    def stop(self):
+        self._should_stop = True
         
     def run(self):
         import time
@@ -646,64 +655,78 @@ class ScanWorker(QThread):
         blurry_images = []
         hashes = []
         
+        # Process in batches to save memory
+        batch_size = 100
+        save_interval = 500  # Save cache every 500 files
+        
         for i, f in enumerate(files):
-            # Get file modification time
+            if self._should_stop:
+                break
+                
             try:
-                mtime = os.path.getmtime(f)
-            except:
-                mtime = 0
+                # Get file modification time
+                try:
+                    mtime = os.path.getmtime(f)
+                except:
+                    mtime = 0
+                    
+                # Check cache
+                cached = cache.get(f, mtime)
                 
-            # Check cache
-            cached = cache.get(f, mtime)
-            
-            # Determine if file is video
-            ext = os.path.splitext(f)[1].lower()
-            is_video = ext in {'.mp4', '.avi', '.mov', '.mkv'}
-            
-            if cached:
-                # Use cached values
-                h = cached.get('hash')
-                score = cached.get('blur_score', 0)
-            else:
-                # Compute new values
-                if is_video:
-                    h = VideoHash.compute_hash(f)
-                    score = 0  # Videos don't have blur scores
+                # Determine if file is video
+                ext = os.path.splitext(f)[1].lower()
+                is_video = ext in {'.mp4', '.avi', '.mov', '.mkv'}
+                
+                if cached:
+                    # Use cached values
+                    h = cached.get('hash')
+                    score = cached.get('blur_score', 0)
                 else:
-                    # Blur Check (images only)
-                    score = BlurDetector.calculate_blur_score(f)
-                    # Hash
-                    h = HashEngine.compute_hash(f)
+                    # Compute new values
+                    if is_video:
+                        h = VideoHash.compute_hash(f)
+                        score = 0
+                    else:
+                        score = BlurDetector.calculate_blur_score(f)
+                        h = HashEngine.compute_hash(f)
+                    
+                    # Cache the results
+                    cache.set(f, mtime, h, score)
                 
-                # Cache the results
-                cache.set(f, mtime, h, score)
-            
-            # Add to results
-            if not is_video and BlurDetector.is_blurry(score):
-                blurry_images.append((f, score))
+                # Add to results
+                if not is_video and BlurDetector.is_blurry(score):
+                    blurry_images.append((f, score))
+                    
+                hashes.append((f, h))
                 
-            hashes.append((f, h))
-            
-            # Emit detailed progress
-            elapsed = time.time() - start_time
-            self.progress_detail.emit(f, i + 1, total, elapsed)
-            
-            if i % 10 == 0:
-                self.progress.emit(int((i / total) * 50))
+                # Emit progress less frequently for better performance
+                if i % 5 == 0:
+                    elapsed = time.time() - start_time
+                    self.progress_detail.emit(f, i + 1, total, elapsed)
+                    self.progress.emit(int((i / total) * 50))
                 
-        # Save cache
+                # Save cache periodically
+                if i % save_interval == 0 and i > 0:
+                    cache.save(self.folder)
+                    
+            except Exception as e:
+                print(f"Error processing {f}: {e}")
+                continue
+                
+        # Final cache save
         cache.save(self.folder)
         
-        self.status.emit("画像をグループ化中...")
-        groups = GroupBuilder.build_groups(hashes, threshold=5)
-        
-        self.progress.emit(100)
-        
-        results = {
-            'blurry': blurry_images,
-            'groups': groups
-        }
-        self.finished.emit(results)
+        if not self._should_stop:
+            self.status.emit("画像をグループ化中...")
+            groups = GroupBuilder.build_groups(hashes, threshold=5)
+            
+            self.progress.emit(100)
+            
+            results = {
+                'blurry': blurry_images,
+                'groups': groups
+            }
+            self.finished.emit(results)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
